@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local data and generated reports
+/data/raw/*
+/data/processed/*
+/data/cache/*
+/data/logs/*
+/reports/*
+
+# Keep directory placeholders
+!.gitkeep
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
