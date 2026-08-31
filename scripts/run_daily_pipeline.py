@@ -35,6 +35,7 @@ from src.news import (  # noqa: E402
     normalize_tavily_response,
 )
 from src.storage import (  # noqa: E402
+    DisclosureStore,
     save_fund_flow,
     save_margin,
     save_dragon_tiger,
@@ -141,6 +142,7 @@ def main() -> int:
     news_result: dict[str, Any] | None = None
     news_error = ""
     news_dimension: dict[str, Any] | None = None
+    news_items: list[dict[str, Any]] = []
     try:
         query = f"{args.query} {' '.join(args.symbol)}".strip()
         routed_news = router.search_news(query, time_range=args.news_time_range, max_results=args.max_news)
@@ -160,6 +162,7 @@ def main() -> int:
             "tavily", raw_response, [*cutoff_result.eligible, *cutoff_result.excluded],
             retrieved_at=retrieved_at,
         )
+        news_items = [*cutoff_result.eligible, *cutoff_result.excluded]
         news_result = {
             "route": routed_news,
             "items": [*cutoff_result.eligible, *cutoff_result.excluded],
@@ -179,12 +182,40 @@ def main() -> int:
             fund_flow_error = ""
             margin_error = ""
             dragon_tiger_error = ""
+            disclosure_error = ""
+            disclosure_data = pd.DataFrame()
+            disclosure_paths: dict[str, Any] = {}
+            symbol_news_result = evaluate_news(
+                news_items, cutoff=trade_date, timezone_name=settings.data_timezone, generated_at=retrieved_at
+            )
             fund_flow_result = evaluate_fund_flow(pd.DataFrame(), generated_at=retrieved_at)
             fund_flow_paths: dict[str, Any] = {}
             margin_paths: dict[str, Any] = {}
             dragon_tiger_paths: dict[str, Any] = {}
             margin_data = pd.DataFrame()
             dragon_tiger_data = pd.DataFrame()
+            try:
+                disclosure_route = router.fetch_disclosures(symbol, history_start, trade_date)
+                disclosure_data = disclosure_route["data"]
+                disclosure_paths = DisclosureStore().save_batch(
+                    symbol, disclosure_route["source"], disclosure_route.get("raw_data"), disclosure_data,
+                    rejected_data=disclosure_route.get("rejected_data"),
+                    quality_report=disclosure_route.get("quality_report"),
+                    retrieved_at=disclosure_route.get("retrieved_at", retrieved_at),
+                    data_version=disclosure_route.get("data_version"),
+                )
+                disclosure_route["paths"] = disclosure_paths
+                routed["disclosure_route"] = disclosure_route
+                symbol_news_result = evaluate_news(
+                    news_items, disclosures=disclosure_data.to_dict(orient="records"), cutoff=trade_date,
+                    timezone_name=settings.data_timezone, generated_at=retrieved_at,
+                )
+            except (DataProviderError, ValueError) as exc:
+                disclosure_error = str(exc)
+                symbol_news_result = evaluate_news(
+                    news_items, cutoff=trade_date, timezone_name=settings.data_timezone, generated_at=retrieved_at
+                )
+
             try:
                 fund_flow_route = router.fetch_fund_flow(symbol, history_start, trade_date)
                 secondary_flow_paths: list[dict[str, str]] = []
@@ -255,6 +286,10 @@ def main() -> int:
             routed["dragon_tiger_error"] = dragon_tiger_error
             routed["fund_flow_paths"] = fund_flow_paths
             routed["fund_flow_error"] = fund_flow_error
+            routed["news"] = symbol_news_result
+            routed["disclosure_data"] = disclosure_data
+            routed["disclosure_paths"] = disclosure_paths
+            routed["disclosure_error"] = disclosure_error
             gate = evaluate_prediction_input(
                 routed["data"],
                 routed.get("quality_report"),
@@ -315,7 +350,7 @@ def main() -> int:
                                 symbol=symbol,
                                 market_environment=market_environment.to_dimension(),
                                 fund_flow=fund_flow_result.to_dimension(),
-                                news=news_dimension,
+                                news=symbol_news_result.to_dimension(),
                                 generated_at=retrieved_at,
                             )
                             prediction_paths = save_next_day_prediction(
@@ -396,6 +431,7 @@ def main() -> int:
                     "signal_error": signal_error,
                     "prediction_error": prediction_error,
                     "fund_flow_error": fund_flow_error,
+                    "disclosure_error": disclosure_error,
                 }
             )
         except (DataProviderError, ValueError) as exc:
@@ -490,6 +526,7 @@ def _render_report(
             lines.extend(_render_fund_flow_report(fund_flow_result, route.get("fund_flow_paths", {}), route.get("margin_paths", {}), route.get("dragon_tiger_paths", {})))
         elif route.get("fund_flow_error"):
             lines.append(f"- 资金行为：未获取（{route['fund_flow_error']}）")
+        lines.extend(_render_disclosure_report(route.get("news"), route.get("disclosure_data"), route.get("disclosure_paths", {}), route.get("disclosure_error", "")))
         market_environment_result = route.get("market_environment")
         if market_environment_result is not None:
             lines.extend(
@@ -562,6 +599,35 @@ def _render_report(
     lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- 预测必须先通过预测输入质量门禁；`blocked` 数据不得进入预测。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
     return "\n".join(lines)
 
+
+
+def _render_disclosure_report(news_result: Any, data: Any, paths: dict[str, Any], error: str = "") -> list[str]:
+    """把公告/财报截面过滤、数量和审计路径写入标的报告。"""
+    lines = ["", "#### 公告与财报", ""]
+    if news_result is None:
+        lines.append(f"- 公告/财报消息面：不可用{f'；获取失败：{error}' if error else ''}")
+        return lines
+    summary = news_result.summary
+    reports = summary.get("cutoff_report", {})
+    disclosure_report = reports.get("disclosures", {}) if isinstance(reports, dict) else {}
+    counts = disclosure_report.get("counts", {})
+    lines.append(
+        f"- 公告/财报消息面贡献：`{summary.get('score', 'NA')}`；"
+        f"有效公告：`{summary.get('announcement_eligible_count', 0)}`；"
+        f"有效财报：`{summary.get('financial_report_eligible_count', 0)}`；"
+        f"排除：`{summary.get('excluded_count', 0)}`"
+    )
+    if counts:
+        lines.append(f"- 披露截面：`{disclosure_report.get('cutoff', '未知')}`；截面状态：`{disclosure_report.get('status', 'unknown')}`；过滤统计：`{counts}`")
+    if data is not None and hasattr(data, "__len__"):
+        lines.append(f"- 标准化记录数：`{len(data)}`；最新纳入公开披露日：`{news_result.data_cutoff or '未知'}`")
+    for key, label in (("processed_path", "标准化数据"), ("quality_path", "质量报告"), ("rejected_path", "异常记录"), ("raw_path", "原始响应"), ("metadata_path", "元数据")):
+        if paths.get(key): lines.append(f"- {label}：`{paths[key]}`")
+    if error: lines.append(f"- 公告/财报获取警告：{error}")
+    for warning in summary.get("warnings", []):
+        if "公告/财报" in warning or "公开披露" in warning or "截面" in warning:
+            lines.append(f"- 公告/财报警告：{warning}")
+    return lines
 
 
 def _render_fund_flow_report(

@@ -87,6 +87,27 @@ class TushareProvider(DataProvider):
             return pd.DataFrame()
         return pd.concat(frames, ignore_index=True, sort=False)
 
+    def disclosures(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        """获取公告和财报；两类数据均保留 Tushare 的公开披露日期。"""
+        client = self._client()
+        announcements_api = getattr(client, "anns_d", None)
+        if not callable(announcements_api):
+            raise DataProviderError("当前 Tushare 客户端没有 anns_d 公告接口")
+        announcements = announcements_api(
+            ts_code=symbol.upper(), start_date=start_date.strftime("%Y%m%d"), end_date=end_date.strftime("%Y%m%d")
+        )
+        income_api = getattr(client, "income", None)
+        if not callable(income_api):
+            raise DataProviderError("当前 Tushare 客户端没有 income 财报接口")
+        # income 的 start_date/end_date 按报告期筛选，而本项目需要按实际公开披露日做截面。
+        # 因此先取该股票的财报记录，再由统一标准化层按 ann_date/f_ann_date 和请求范围过滤，
+        # 避免遗漏“报告期较早、但近期才披露”的财报。
+        financial_reports = income_api(
+            ts_code=symbol.upper(),
+            fields="ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,basic_eps,total_revenue,n_income",
+        )
+        return {"announcements": announcements, "financial_reports": financial_reports}
+
     def healthcheck(self) -> dict[str, Any]:
         try:
             self._client()

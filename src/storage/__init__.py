@@ -1,3 +1,4 @@
+from .disclosure_store import DisclosureStore
 """数据存储工具。"""
 
 from .market_store import (
@@ -15,6 +16,7 @@ from .market_store import (
 )
 
 __all__ = [
+    "DisclosureStore",
     "save_fund_flow",
     "save_margin",
     "save_dragon_tiger",

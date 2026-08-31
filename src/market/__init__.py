@@ -2,6 +2,17 @@
 
 from .calendar import CalendarError, CalendarValidationResult, TradingCalendar, validate_observed_trade_dates
 from .cross_validator import compare_daily_bars
+from .disclosures import (
+    DISCLOSURE_COLUMNS,
+    DISCLOSURE_RULES_VERSION,
+    DisclosureCutoffResult,
+    DisclosureNormalizationError,
+    DisclosureQualityResult,
+    deduplicate_disclosures,
+    filter_disclosures_by_cutoff,
+    normalize_disclosures,
+    validate_disclosures,
+)
 from .dragon_tiger import (
     DRAGON_TIGER_COLUMNS,
     DRAGON_TIGER_RULES_VERSION,
@@ -34,7 +45,7 @@ from .quality import QualityResult, validate_daily_bars
 from .schema import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, STANDARD_COLUMNS
 
 __all__ = [
-    "CalendarError", "FUND_FLOW_COLUMNS", "FUND_FLOW_RULES_VERSION", "FundFlowNormalizationError", "FundFlowQualityResult",
+    "CalendarError", "DISCLOSURE_COLUMNS", "DISCLOSURE_RULES_VERSION", "DisclosureCutoffResult", "DisclosureNormalizationError", "DisclosureQualityResult", "deduplicate_disclosures", "filter_disclosures_by_cutoff", "normalize_disclosures", "validate_disclosures", "FUND_FLOW_COLUMNS", "FUND_FLOW_RULES_VERSION", "FundFlowNormalizationError", "FundFlowQualityResult",
     "DRAGON_TIGER_COLUMNS", "DRAGON_TIGER_RULES_VERSION", "DragonTigerNormalizationError", "DragonTigerQualityResult",
     "MARGIN_COLUMNS", "MARGIN_RULES_VERSION", "MarginNormalizationError", "MarginQualityResult",
     "CalendarValidationResult", "MarketNormalizationError", "OPTIONAL_COLUMNS", "QualityResult", "REQUIRED_COLUMNS", "STANDARD_COLUMNS", "TradingCalendar",

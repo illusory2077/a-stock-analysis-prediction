@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.run_daily_pipeline import _render_report, build_parser
+from scripts.run_daily_pipeline import _render_disclosure_report, _render_report, build_parser
 from src.analysis import (
     calculate_technical_indicators,
     evaluate_fund_flow,
@@ -225,3 +225,43 @@ def test_render_report_includes_news_cutoff_and_score(tmp_path: Path) -> None:
     assert "信息截面：`2026-04-10T23:59:59.999999+08:00`" in report
     assert "有效数：1；排除数：1" in report
     assert "截面：`eligible`" in report
+
+
+def test_render_disclosure_report_includes_cutoff_counts_and_paths() -> None:
+    result = evaluate_news(
+        [{
+            "news_id": "n1", "title": "市场消息",
+            "published_at": "2026-08-31T08:00:00+08:00",
+        }],
+        disclosures=[
+            {
+                "source_record_id": "a1", "report_type": "announcement",
+                "title": "公司获批订单", "published_at": "2026-08-31T09:00:00+08:00",
+            },
+            {
+                "source_record_id": "f1", "report_type": "financial_report",
+                "title": "业绩增长", "published_at": "2026-08-31T10:00:00+08:00",
+            },
+            {
+                "source_record_id": "a2", "report_type": "announcement",
+                "title": "未来公告", "published_at": "2026-09-01T09:00:00+08:00",
+            },
+        ],
+        cutoff=date(2026, 8, 31),
+        generated_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+    )
+    report = "\n".join(_render_disclosure_report(
+        result,
+        pd.DataFrame([{"source_record_id": "a1"}, {"source_record_id": "f1"}]),
+        {
+            "processed_path": "processed/disclosures/600519.SH_2026-08-31.jsonl",
+            "quality_path": "processed/disclosures/600519.SH_2026-08-31_quality.json",
+            "raw_path": "raw/disclosures/tushare/2026-08-31/raw.json",
+        },
+    ))
+
+    assert "#### 公告与财报" in report
+    assert "有效公告：`1`" in report
+    assert "有效财报：`1`" in report
+    assert "排除：`1`" in report
+    assert "processed/disclosures/600519.SH_2026-08-31.jsonl" in report

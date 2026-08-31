@@ -16,9 +16,11 @@ from src.market import (
     compare_dragon_tiger,
     compare_margin,
     normalize_dragon_tiger,
+    normalize_disclosures,
     normalize_fund_flow,
     normalize_margin,
     validate_dragon_tiger,
+    validate_disclosures,
     validate_fund_flow,
     validate_margin,
     normalize_daily_bars,
@@ -296,6 +298,50 @@ class DataSourceRouter:
         if cross_report.get("warnings") and selected["quality_report"].get("status") == "validated":
             selected["quality_report"]["status"] = "validated_with_warning"
         return {**selected, "degraded": selected_index > 0, "attempts": attempts, "secondary_audits": secondary_audits}
+
+    def fetch_disclosures(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        """获取公告/财报，统一字段并执行公开披露时间质量检查。"""
+        providers = [provider for provider in self.market_providers if callable(getattr(provider, "disclosures", None))]
+        if not providers:
+            raise DataProviderError(f"没有可用的数据源: 获取 {symbol} 公告/财报")
+        attempts: list[dict[str, Any]] = []
+        for index, provider in enumerate(providers):
+            name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(lambda provider=provider: provider.disclosures(symbol, start_date, end_date))
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{name} 返回空公告/财报")
+                retrieved_at = datetime.now(timezone.utc)
+                frames: list[pd.DataFrame] = []; rejected: list[pd.DataFrame] = []; input_rows = 0
+                normalization_warnings: list[str] = []; mappings: dict[str, Any] = {}
+                sections = raw_data if isinstance(raw_data, dict) else {"announcements": raw_data}
+                for section, report_type in (("announcements", "announcement"), ("financial_reports", "financial_report")):
+                    section_data = sections.get(section) if isinstance(sections, dict) else None
+                    if self._is_empty_result(section_data): continue
+                    normalized = normalize_disclosures(
+                        section_data, symbol=symbol, report_type=report_type, source=name, retrieved_at=retrieved_at,
+                        start_date=start_date, end_date=end_date, data_version=getattr(provider, "data_version", None),
+                    )
+                    frames.append(normalized); input_rows += int(normalized.attrs.get("input_rows", len(normalized)))
+                    rejected_data = normalized.attrs.get("rejected_data")
+                    if isinstance(rejected_data, pd.DataFrame) and not rejected_data.empty: rejected.append(rejected_data)
+                    normalization_warnings.extend(normalized.attrs.get("normalization_warnings", [])); mappings[report_type] = normalized.attrs.get("column_mapping", {})
+                if not frames: raise DataProviderError(f"{name} 未返回公告或财报记录")
+                for frame in frames: frame.attrs = {}
+                for frame in rejected: frame.attrs = {}
+                data = pd.concat(frames, ignore_index=True, sort=False); data.attrs = {}
+                rejected_data = pd.concat(rejected, ignore_index=True, sort=False) if rejected else None
+                if rejected_data is not None: rejected_data.attrs = {}
+                quality = validate_disclosures(data, rejected_data=rejected_data, input_rows=input_rows, warnings=normalization_warnings, column_mapping=mappings)
+                if quality.data.empty:
+                    detail = "; ".join(quality.report.get("errors", [])) or "没有有效公告/财报记录"
+                    raise DataProviderError(f"{name} 数据质量校验失败: {detail}")
+                attempts.append({"provider": name, "role": "primary", "ok": True, "retries": retries})
+                return {"data": quality.data, "quality_report": quality.report, "raw_data": raw_data, "rejected_data": quality.rejected_data, "retrieved_at": retrieved_at, "source": name, "data_version": getattr(provider, "data_version", None), "degraded": index > 0, "attempts": attempts, "secondary_audits": []}
+            except Exception as exc:  # noqa: BLE001
+                attempts.append({"provider": name, "role": "primary", "ok": False, "error": str(exc), "retryable": self._is_retryable(exc)})
+        details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
+        raise DataProviderError(f"获取 {symbol} 公告/财报的所有数据源均失败: {details}")
 
     def fetch_margin(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
         """获取融资融券明细，完成标准化、质量检查和主备交叉验证。"""

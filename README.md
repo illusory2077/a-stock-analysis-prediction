@@ -105,7 +105,7 @@ tests/                    自动化测试
 
 每日流水线默认向目标交易日前回看 120 个自然日，以保证 MA、MACD、RSI、布林带和 ATR 等长周期指标有足够历史数据；可用 `--lookback-days 0` 恢复仅获取目标日。
 
-新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，标准行情、技术指标和报告分别保存到 `data/processed/market/`、`data/processed/market/indicators/` 与 `reports/`。备用行情源的原始响应保存到 `data/raw/market/{source}/{date}/`，主备交叉验证明细保存到 `data/processed/market/audit/`，不可用或不一致状态也会保留错误与待核验信息。
+新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，公告/财报原始响应保存到 `data/raw/disclosures/`，标准化披露数据、异常记录和质量报告保存到 `data/processed/disclosures/`；标准行情、技术指标和报告分别保存到 `data/processed/market/`、`data/processed/market/indicators/` 与 `reports/`。备用行情源的原始响应保存到 `data/raw/market/{source}/{date}/`，主备交叉验证明细保存到 `data/processed/market/audit/`，不可用或不一致状态也会保留错误与待核验信息。
 
 ## 预测输入质量门禁
 
@@ -158,3 +158,16 @@ prediction = generate_next_day_prediction(
 每日流水线会在生成个股预测前获取 Tavily 新闻，先按发布时间执行信息截面过滤：目标交易日使用 `Asia/Shanghai` 当日收盘后的本地日期截面；缺少或无法解析 `published_at` 的新闻只保存审计，不进入评分；晚于截面的新闻会被排除，防止未来函数。
 
 `src.analysis.evaluate_news` 使用可解释的利好/利空关键词基线生成 -1 到 +1 的消息面评分，并将有效新闻数、排除数、关键词证据、评分规则版本和告警传入次日预测。新闻原始响应和带截面状态的标准化记录保存到 `data/raw/news/` 与 `data/processed/news/`。未配置 `TAVILY_API_KEY` 或新闻接口失败时，消息面标记为不可用，预测自动按实际可用维度重新归一化。
+
+### 公告与财报接入
+
+每日流水线会通过 `DataSourceRouter.fetch_disclosures` 获取公告和财报，并统一为以下核心字段：`symbol`、`exchange`、`report_type`、`report_period`、`published_at`、`published_at_utc`、`source`、`source_record_id`、`retrieved_at` 和 `data_version`。
+
+- Tushare Pro 为当前公告/财报适配器；公告使用 `anns_d`，财报使用 `income`。
+- 财报的 `f_ann_date`（实际公告日期）优先作为公开披露时间，`ann_date` 仅作兼容回退；报告期不能替代公开披露时间。
+- 为避免遗漏报告期较早但近期才披露的财报，适配器先取得该股票财报记录，再由标准化层按公开披露日期和请求范围过滤。
+- 预测信息截面按 `Asia/Shanghai` 解释日期型截止时间；缺少、无法解析或晚于截面的披露只保留在审计结果，不进入消息面评分。
+- 主数据源失败时，路由器会尝试下一个提供 `disclosures` 方法的数据源；若没有可用适配器，公告/财报失败不会阻断行情、技术面和资金面流程，但报告会保留失败原因。
+- 当前 AKShare 尚未提供本项目统一的公告/财报适配器，因此不能把 AKShare 自动视为公告/财报备用源。缺少 `TUSHARE_TOKEN` 时应明确标记数据不可用，不生成伪造结果。
+
+公告/财报的标准化规则、质量检查和未来函数过滤位于 `src/market/disclosures.py`；保存逻辑位于 `src/storage/disclosure_store.py`。
