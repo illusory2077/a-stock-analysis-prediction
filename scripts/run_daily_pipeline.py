@@ -37,7 +37,16 @@ def main() -> int:
     for symbol in args.symbol:
         try:
             routed = router.fetch_daily_bars(symbol, trade_date, trade_date)
-            paths = save_market_data(symbol, routed["data"], source=routed["source"], trade_date=trade_date)
+            paths = save_market_data(
+                symbol,
+                routed["data"],
+                source=routed["source"],
+                trade_date=trade_date,
+                raw_data=routed.get("raw_data"),
+                rejected_data=routed.get("rejected_data"),
+                quality_report=routed.get("quality_report"),
+                retrieved_at=routed.get("retrieved_at", retrieved_at),
+            )
             market_results.append({"symbol": symbol, "route": routed, "paths": paths})
         except (DataProviderError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
@@ -90,14 +99,25 @@ def _render_report(
     for result in market_results:
         route = result["route"]
         data = route["data"]
+        quality = route.get("quality_report", {})
         lines.append(f"### {result['symbol']}")
         lines.append(f"- 来源：`{route['source']}`；是否降级：`{route['degraded']}`")
-        lines.append(f"- 记录数：{len(data) if hasattr(data, '__len__') else '未知'}")
+        lines.append(f"- 质量状态：`{quality.get('status', 'unknown')}`；规则版本：`{quality.get('quality_rules_version', 'unknown')}`")
+        lines.append(f"- 记录数：{len(data) if hasattr(data, '__len__') else '未知'}；拒绝数：`{quality.get('rejected_rows', 0)}`；去重数：`{quality.get('duplicates_removed', 0)}`")
         lines.append(f"- 保存文件：`{result['paths']['data_path']}`")
+        if result["paths"].get("raw_path"):
+            lines.append(f"- 原始数据：`{result['paths']['raw_path']}`")
+        lines.append(f"- 质量报告：`{result['paths']['quality_path']}`")
+        if result["paths"].get("rejected_path"):
+            lines.append(f"- 异常行：`{result['paths']['rejected_path']}`")
         if hasattr(data, "columns"):
             lines.append(f"- 字段：`{', '.join(map(str, data.columns))}`")
             if not data.empty:
                 lines.append(f"- 最新记录：`{data.iloc[-1].to_dict()}`")
+        for warning in quality.get("warnings", []):
+            lines.append(f"- 质量警告：{warning}")
+        for error in quality.get("errors", []):
+            lines.append(f"- 质量错误：{error}")
         lines.append("")
     if failures:
         lines.extend(["### 行情失败或降级详情", "", *[f"- {item}" for item in failures], ""])
@@ -115,7 +135,7 @@ def _render_report(
             lines.append(f"- [{title}]({item['url']})（发布时间：{item.get('published_at') or '未知'}）")
     else:
         lines.append(f"- 新闻搜索失败：{news_error or '未返回结果'}")
-    lines.extend(["", "## 数据限制", "", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
+    lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
     return "\n".join(lines)
 
 

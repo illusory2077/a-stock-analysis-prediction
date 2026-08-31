@@ -26,12 +26,14 @@ class AkshareProvider(DataProvider):
         except ImportError as exc:
             raise DataProviderError("未安装 akshare") from exc
 
+        code = symbol.upper().split(".", 1)[0]
         return ak.stock_zh_a_hist(
-            symbol=symbol.replace(".SH", "").replace(".SZ", ""),
+            symbol=code,
             period="daily",
             start_date=start_date.strftime("%Y%m%d"),
             end_date=end_date.strftime("%Y%m%d"),
-            adjust="qfq",
+            # 统一内部口径为未复权；前复权在技术分析层另行计算。
+            adjust="",
         )
 
     def realtime_snapshot(self) -> Any:

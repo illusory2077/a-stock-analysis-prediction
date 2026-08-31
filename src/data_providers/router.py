@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
 from config.settings import settings
+from src.market import normalize_daily_bars, validate_daily_bars
 from .akshare_provider import AkshareProvider
 from .base import DataProvider, DataProviderError
 from .tavily_provider import TavilyProvider
@@ -27,12 +28,61 @@ class DataSourceRouter:
         self.sleep_fn = sleep_fn
 
     def fetch_daily_bars(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
-        """获取日线，并返回数据、来源、是否降级和尝试记录。"""
-        return self._run_with_fallback(
-            self.market_providers,
-            lambda provider: provider.daily_bars(symbol, start_date, end_date),
-            operation_name=f"获取 {symbol} 日线",
-        )
+        """获取日线，统一标准化并执行质量检查后返回。"""
+        if not self.market_providers:
+            raise DataProviderError(f"没有可用的数据源: 获取 {symbol} 日线")
+
+        attempts: list[dict[str, Any]] = []
+        for index, provider in enumerate(self.market_providers):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(
+                    lambda provider=provider: provider.daily_bars(symbol, start_date, end_date)
+                )
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{provider_name} 返回空数据")
+                retrieved_at = datetime.now(timezone.utc)
+                normalized = normalize_daily_bars(
+                    raw_data,
+                    symbol=symbol,
+                    source=provider_name,
+                    retrieved_at=retrieved_at,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                quality = validate_daily_bars(
+                    normalized,
+                    rejected_data=normalized.attrs.get("rejected_data"),
+                    input_rows=normalized.attrs.get("input_rows"),
+                    warnings=normalized.attrs.get("normalization_warnings", []),
+                    column_mapping=normalized.attrs.get("column_mapping", {}),
+                )
+                if quality.data.empty:
+                    detail = "; ".join(quality.report.get("errors", [])) or "没有有效行情记录"
+                    raise DataProviderError(f"{provider_name} 数据质量校验失败: {detail}")
+                attempts.append({"provider": provider_name, "ok": True, "retries": retries})
+                return {
+                    "data": quality.data,
+                    "source": provider_name,
+                    "degraded": index > 0,
+                    "attempts": attempts,
+                    "quality_report": quality.report,
+                    "raw_data": raw_data,
+                    "rejected_data": quality.rejected_data,
+                    "retrieved_at": retrieved_at,
+                }
+            except Exception as exc:  # noqa: BLE001
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "ok": False,
+                        "error": str(exc),
+                        "retryable": self._is_retryable(exc),
+                    }
+                )
+
+        details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
+        raise DataProviderError(f"获取 {symbol} 日线的所有数据源均失败: {details}")
 
     def search_news(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """按新闻数据源优先级搜索，返回原始响应及路由元数据。"""
