@@ -117,4 +117,4 @@ tests/                    自动化测试
 
 预测入口可以调用 `src.analysis.require_prediction_input`，在 `blocked` 时抛出 `PredictionInputBlockedError`，避免业务逻辑绕过门禁。
 
-技术指标入口 `src.analysis.calculate_technical_indicators` 会强制执行上述门禁，并计算均线、MACD、RSI、布林带、ATR、滚动支撑/压力位和波动率。
+技术指标入口 `src.analysis.calculate_technical_indicators` 会强制执行上述门禁，并计算均线、MACD、RSI、布林带、ATR、滚动支撑/压力位和波动率。技术信号入口 `src.analysis.generate_technical_signals` 将这些指标转换为可解释的趋势、MACD、RSI、布林带、支撑/压力和波动率信号，输出综合方向、信号强度、置信度、触发条件和失效条件；每日流水线会把信号数据保存到 `data/processed/market/signals/` 并写入日报。

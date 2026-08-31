@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.run_daily_pipeline import _render_report, build_parser
-from src.analysis import calculate_technical_indicators
+from src.analysis import calculate_technical_indicators, generate_technical_signals
 
 
 def _bars() -> pd.DataFrame:
@@ -59,6 +59,8 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
         "prediction_quality_gate": result.quality_gate.to_dict(),
         "technical_indicators": result,
         "technical_indicator_paths": {"data_path": "indicators.parquet"},
+        "technical_signals": generate_technical_signals(result),
+        "technical_signal_paths": {"data_path": "signals.parquet", "metadata_path": "signals_metadata.json"},
     }
     report = _render_report(
         args,
@@ -74,3 +76,6 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     assert "#### 技术指标" in report
     assert "ma_5=" in report
     assert "indicators.parquet" in report
+    assert "#### 技术信号" in report
+    assert "综合方向：`bullish`" in report
+    assert "signals.parquet" in report

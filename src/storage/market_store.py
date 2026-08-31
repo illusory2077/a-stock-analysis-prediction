@@ -158,6 +158,64 @@ def save_technical_indicators(
     return paths
 
 
+
+def save_technical_signals(
+    symbol: str,
+    data: pd.DataFrame,
+    *,
+    source: str,
+    trade_date: date,
+    signal_summary: dict[str, Any] | None = None,
+    quality_gate: dict[str, Any] | None = None,
+    root: Path | None = None,
+    retrieved_at: datetime | None = None,
+    data_version: str | None = None,
+    frequency: str = "1d",
+    price_adjustment: str = "none",
+) -> dict[str, str]:
+    """保存逐日技术信号和最新信号摘要，不覆盖同一日期的既有结果。"""
+    if not isinstance(data, pd.DataFrame):
+        raise TypeError("技术信号结果必须是 pandas DataFrame")
+
+    root = root or settings.data_dir
+    stamp = _as_utc(retrieved_at or datetime.now(timezone.utc))
+    safe_symbol = _safe_symbol(symbol)
+    date_text = trade_date.isoformat()
+    processed_dir = root / "processed" / "market" / "signals"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    base = processed_dir / f"{safe_symbol}_{date_text}_technical_signals"
+    data_base = _non_overwriting_path(base.with_name(base.name + ".parquet"), stamp)
+
+    try:
+        data.to_parquet(data_base, index=False)
+    except Exception:  # noqa: BLE001
+        data_base = data_base.with_name(data_base.stem + ".csv")
+        data.to_csv(data_base, index=False, encoding="utf-8-sig")
+
+    paths = {"data_path": str(data_base)}
+    metadata_base = data_base.with_name(data_base.stem + "_metadata.json")
+    metadata_path = _non_overwriting_path(metadata_base, stamp)
+    metadata = {
+        "symbol": symbol,
+        "source": source,
+        "trade_date": date_text,
+        "retrieved_at": stamp.isoformat(),
+        "frequency": frequency,
+        "price_adjustment": price_adjustment,
+        "data_version": data_version,
+        "row_count": len(data),
+        "columns": [str(column) for column in data.columns],
+        "quality_gate": quality_gate or {},
+        "signal_summary": signal_summary or {},
+        "data_path": str(data_base),
+    }
+    metadata_path.write_text(
+        json.dumps(_jsonable(metadata), ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    paths["metadata_path"] = str(metadata_path)
+    return paths
+
 def save_secondary_market_audit(
     symbol: str,
     source: str,

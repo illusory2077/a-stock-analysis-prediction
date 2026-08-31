@@ -13,7 +13,9 @@ if str(ROOT) not in sys.path:
 from src.analysis import (  # noqa: E402
     PredictionInputBlockedError,
     TechnicalIndicatorError,
+    TechnicalSignalError,
     calculate_technical_indicators,
+    generate_technical_signals,
     evaluate_prediction_input,
 )
 from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
@@ -22,6 +24,7 @@ from src.storage import (  # noqa: E402
     save_market_data,
     save_secondary_market_audit,
     save_technical_indicators,
+    save_technical_signals,
 )
 
 
@@ -68,6 +71,7 @@ def main() -> int:
             routed["prediction_quality_gate"] = gate.to_dict()
             routed.setdefault("quality_report", {})["prediction_quality_gate"] = gate.to_dict()
             indicator_error = ""
+            signal_error = ""
             if gate.can_predict:
                 try:
                     indicator_result = calculate_technical_indicators(
@@ -91,12 +95,33 @@ def main() -> int:
                     )
                     routed["technical_indicators"] = indicator_result
                     routed["technical_indicator_paths"] = indicator_paths
+                    try:
+                        signal_result = generate_technical_signals(indicator_result, symbol=symbol)
+                        signal_paths = save_technical_signals(
+                            symbol,
+                            signal_result.data,
+                            source=routed["source"],
+                            trade_date=trade_date,
+                            signal_summary=signal_result.summary,
+                            quality_gate=signal_result.quality_gate.to_dict(),
+                            retrieved_at=routed.get("retrieved_at", retrieved_at),
+                            data_version=routed.get("data_version"),
+                        )
+                        routed["technical_signals"] = signal_result
+                        routed["technical_signal_paths"] = signal_paths
+                    except (PredictionInputBlockedError, TechnicalSignalError) as exc:
+                        signal_error = str(exc)
+                        routed["technical_signal_error"] = signal_error
                 except (PredictionInputBlockedError, TechnicalIndicatorError) as exc:
                     indicator_error = str(exc)
+                    signal_error = "技术指标未生成，跳过技术信号计算"
                     routed["technical_indicator_error"] = indicator_error
+                    routed["technical_signal_error"] = signal_error
             else:
-                indicator_error = "预测输入门禁为 blocked，跳过技术指标计算"
+                indicator_error = "预测输入门禁为 blocked，跳过技术指标和技术信号计算"
+                signal_error = indicator_error
                 routed["technical_indicator_error"] = indicator_error
+                routed["technical_signal_error"] = signal_error
             secondary_paths: list[dict[str, str]] = []
             for audit in routed.get("secondary_audits", []):
                 comparison = audit.get("comparison") if isinstance(audit, dict) else None
@@ -134,7 +159,7 @@ def main() -> int:
                 data_version=routed.get("data_version"),
             )
             paths["secondary_audits"] = secondary_paths
-            market_results.append({"symbol": symbol, "route": routed, "paths": paths, "indicator_error": indicator_error})
+            market_results.append({"symbol": symbol, "route": routed, "paths": paths, "indicator_error": indicator_error, "signal_error": signal_error})
         except (DataProviderError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
 
@@ -239,6 +264,11 @@ def _render_report(
             lines.extend(_render_indicator_report(indicator_result, route.get("technical_indicator_paths", {})))
         elif result.get("indicator_error"):
             lines.append(f"- 技术指标：未计算（{result['indicator_error']}）")
+        signal_result = route.get("technical_signals")
+        if signal_result is not None:
+            lines.extend(_render_signal_report(signal_result, route.get("technical_signal_paths", {})))
+        elif result.get("signal_error"):
+            lines.append(f"- 技术信号：未计算（{result['signal_error']}）")
         if hasattr(data, "columns"):
             lines.append(f"- 字段：`{', '.join(map(str, data.columns))}`")
             if not data.empty:
@@ -307,6 +337,45 @@ def _render_indicator_report(indicator_result: Any, paths: dict[str, str]) -> li
         lines.append(f"- 指标警告：{warning}")
     return lines
 
+
+def _render_signal_report(signal_result: Any, paths: dict[str, str]) -> list[str]:
+    """把最新技术信号、解释和风险条件写入每日报告。"""
+    summary = signal_result.summary
+    lines = ["", "#### 技术信号", ""]
+    lines.append(
+        f"- 综合方向：`{summary.get('direction', 'neutral')}`；综合分数：`{summary.get('composite_score', 'NA')}`；"
+        f"信号强度：`{summary.get('signal_strength_label', 'weak')}`（{summary.get('signal_strength', 0):.2f}%）；"
+        f"置信度：`{summary.get('confidence', 0):.3f}`"
+    )
+    lines.append(f"- 信号数据截止：`{summary.get('latest_trade_date', '未知')}`；最新收盘：`{_format_indicator_value(summary.get('latest_close'))}`")
+    if paths.get("data_path"):
+        lines.append(f"- 信号数据：`{paths['data_path']}`")
+    if paths.get("metadata_path"):
+        lines.append(f"- 信号元数据：`{paths['metadata_path']}`")
+    components = summary.get("components", {})
+    component_text = "；".join(
+        f"{name}={value.get('label', 'unknown')}({value.get('score', 'NA')})"
+        for name, value in components.items()
+    )
+    if component_text:
+        lines.append(f"- 信号分解：{component_text}")
+    volatility = summary.get("volatility", {})
+    if volatility:
+        lines.append(f"- 波动率：`{volatility.get('level', 'unknown')}`；{volatility.get('evidence', '')}")
+    levels = summary.get("levels", {})
+    if levels:
+        lines.append(
+            f"- 支撑/压力位置：`{levels.get('context', 'unknown')}`；"
+            f"20日支撑距现价 {levels.get('support_distance_pct', 'NA')}%；"
+            f"20日压力距现价 {levels.get('resistance_distance_pct', 'NA')}%"
+        )
+    for trigger in summary.get("triggers", []):
+        lines.append(f"- 触发条件：{trigger}")
+    for invalidation in summary.get("invalidations", []):
+        lines.append(f"- 失效条件：{invalidation}")
+    for warning in summary.get("warnings", []):
+        lines.append(f"- 信号警告：{warning}")
+    return lines
 
 def _format_indicator_value(value: Any) -> str:
     try:

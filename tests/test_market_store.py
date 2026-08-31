@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from src.storage import save_market_data, save_secondary_market_audit, save_technical_indicators
+from src.storage import save_market_data, save_secondary_market_audit, save_technical_indicators, save_technical_signals
 
 
 def test_save_market_data_writes_raw_quality_and_rejected(tmp_path) -> None:
@@ -117,4 +117,27 @@ def test_save_technical_indicators_writes_data_and_metadata(tmp_path) -> None:
     metadata = json.loads((tmp_path / "processed/market/indicators/600519.SH_2026-08-19_technical_indicators_metadata.json").read_text(encoding="utf-8"))
     assert metadata["source"] == "tushare"
     assert metadata["data_version"] == "test-v1"
+    assert metadata["quality_gate"]["status"] == "approved"
+
+
+def test_save_technical_signals_writes_data_and_metadata(tmp_path) -> None:
+    data = pd.DataFrame(
+        [{"symbol": "600519.SH", "trade_date": date(2026, 8, 19), "close": 100.0, "signal_direction": "bullish"}]
+    )
+    paths = save_technical_signals(
+        "600519.SH",
+        data,
+        source="tushare",
+        trade_date=date(2026, 8, 19),
+        signal_summary={"direction": "bullish", "confidence": 0.8},
+        quality_gate={"status": "approved", "can_predict": True},
+        data_version="test-v1",
+        root=tmp_path,
+    )
+
+    assert paths["data_path"].endswith(".parquet")
+    assert (tmp_path / "processed/market/signals/600519.SH_2026-08-19_technical_signals.parquet").exists()
+    metadata = json.loads((tmp_path / "processed/market/signals/600519.SH_2026-08-19_technical_signals_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["source"] == "tushare"
+    assert metadata["signal_summary"]["direction"] == "bullish"
     assert metadata["quality_gate"]["status"] == "approved"

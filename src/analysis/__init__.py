@@ -10,6 +10,7 @@ from .quality_gate import (
     evaluate_prediction_input,
     require_prediction_input,
 )
+from .signals import TechnicalSignalError, TechnicalSignalResult, generate_technical_signals
 
 __all__ = [
     "GATE_RULES_VERSION",
@@ -17,7 +18,10 @@ __all__ = [
     "QualityGateResult",
     "TechnicalIndicatorError",
     "TechnicalIndicatorResult",
+    "TechnicalSignalError",
+    "TechnicalSignalResult",
     "calculate_technical_indicators",
     "evaluate_prediction_input",
+    "generate_technical_signals",
     "require_prediction_input",
 ]
