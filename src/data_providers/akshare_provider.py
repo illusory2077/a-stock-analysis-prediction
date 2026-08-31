@@ -24,6 +24,18 @@ class AkshareProvider(DataProvider):
         ak_symbol = ("sh" if exchange in {"SH", "SSE"} or code.startswith("000") else "sz") + code
         return ak.stock_zh_index_daily(symbol=ak_symbol)
 
+    def fund_flow(self, symbol: str, start_date: date, end_date: date) -> Any:
+        """获取个股每日资金流向；AKShare 返回的金额统一按人民币元处理。"""
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise DataProviderError("未安装 akshare") from exc
+
+        code = symbol.upper().split(".", 1)[0]
+        exchange = symbol.upper().rsplit(".", 1)[-1] if "." in symbol else "SH"
+        market = {"SH": "sh", "SSE": "sh", "SZ": "sz", "SZSE": "sz", "BJ": "bj", "BSE": "bj"}.get(exchange, "sh")
+        return ak.stock_individual_fund_flow(stock=code, market=market)
+
     def healthcheck(self) -> dict[str, Any]:
         try:
             import akshare  # noqa: F401

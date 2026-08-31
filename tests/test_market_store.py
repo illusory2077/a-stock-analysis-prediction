@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 import pandas as pd
 
 from src.storage import (
+    save_fund_flow,
     save_market_data,
     save_next_day_prediction,
     save_secondary_market_audit,
@@ -175,3 +176,16 @@ def test_save_next_day_prediction_writes_json_without_overwriting(tmp_path) -> N
         root=tmp_path,
     )
     assert second["prediction_path"] != paths["prediction_path"]
+
+
+def test_save_fund_flow_writes_raw_quality_and_metadata(tmp_path) -> None:
+    data = pd.DataFrame([{"symbol": "600519.SH", "trade_date": date(2026, 8, 19), "net_flow_amount": 100000.0}])
+    paths = save_fund_flow(
+        "600519.SH", data, source="tushare", trade_date=date(2026, 8, 19),
+        raw_data=[{"net_mf_amount": 10}], quality_report={"status": "validated"}, root=tmp_path,
+    )
+
+    assert paths["data_path"].endswith(".parquet")
+    assert (tmp_path / "raw/fund_flow/tushare/2026-08-19/600519.SH_raw.json").exists()
+    assert (tmp_path / "processed/fund_flow/600519.SH_2026-08-19_quality.json").exists()
+    assert (tmp_path / "processed/fund_flow/600519.SH_2026-08-19_metadata.json").exists()

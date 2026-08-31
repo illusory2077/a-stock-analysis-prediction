@@ -42,6 +42,21 @@ class TushareProvider(DataProvider):
             fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
         )
 
+    def fund_flow(self, symbol: str, start_date: date, end_date: date) -> Any:
+        """获取个股每日资金流向；Tushare 金额字段单位为万元。"""
+        client = self._client()
+        return client.moneyflow(
+            ts_code=symbol,
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            fields=(
+                "ts_code,trade_date,buy_sm_vol,buy_sm_amount,sell_sm_vol,sell_sm_amount,"
+                "buy_md_vol,buy_md_amount,sell_md_vol,sell_md_amount,"
+                "buy_lg_vol,buy_lg_amount,sell_lg_vol,sell_lg_amount,"
+                "buy_elg_vol,buy_elg_amount,sell_elg_vol,sell_elg_amount,net_mf_vol,net_mf_amount"
+            ),
+        )
+
     def healthcheck(self) -> dict[str, Any]:
         try:
             self._client()

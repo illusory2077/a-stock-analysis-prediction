@@ -12,6 +12,9 @@ from src.market import (
     CalendarError,
     TradingCalendar,
     compare_daily_bars,
+    compare_fund_flow,
+    normalize_fund_flow,
+    validate_fund_flow,
     normalize_daily_bars,
     validate_daily_bars,
     validate_observed_trade_dates,
@@ -232,6 +235,62 @@ class DataSourceRouter:
             "attempts": attempts,
             "secondary_audits": secondary_audits,
         }
+    def fetch_fund_flow(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        """获取个股日资金流向，完成标准化、质量检查和主备交叉验证。"""
+        providers = [provider for provider in self.market_providers if callable(getattr(provider, "fund_flow", None))]
+        if not providers:
+            raise DataProviderError(f"没有可用的数据源: 获取 {symbol} 资金流向")
+
+        attempts: list[dict[str, Any]] = []
+        selected: dict[str, Any] | None = None
+        selected_index = -1
+        for index, provider in enumerate(providers):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(lambda provider=provider: provider.fund_flow(symbol, start_date, end_date))
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{provider_name} 返回空数据")
+                retrieved_at = datetime.now(timezone.utc)
+                normalized = normalize_fund_flow(
+                    raw_data, symbol=symbol, source=provider_name, retrieved_at=retrieved_at,
+                    start_date=start_date, end_date=end_date, data_version=getattr(provider, "data_version", None),
+                )
+                quality = validate_fund_flow(
+                    normalized, rejected_data=normalized.attrs.get("rejected_data"),
+                    input_rows=normalized.attrs.get("input_rows"),
+                    warnings=normalized.attrs.get("normalization_warnings", []),
+                    column_mapping=normalized.attrs.get("column_mapping", {}),
+                )
+                if quality.data.empty:
+                    detail = "; ".join(quality.report.get("errors", [])) or "没有有效资金流向记录"
+                    raise DataProviderError(f"{provider_name} 数据质量校验失败: {detail}")
+                attempts.append({"provider": provider_name, "role": "primary", "ok": True, "retries": retries})
+                selected = {
+                    "data": quality.data, "quality_report": quality.report, "raw_data": raw_data,
+                    "rejected_data": quality.rejected_data, "retrieved_at": retrieved_at,
+                    "source": provider_name, "data_version": getattr(provider, "data_version", None),
+                }
+                selected_index = index
+                break
+            except Exception as exc:  # noqa: BLE001
+                attempts.append({"provider": provider_name, "role": "primary", "ok": False, "error": str(exc), "retryable": self._is_retryable(exc)})
+
+        if selected is None:
+            details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
+            raise DataProviderError(f"获取 {symbol} 资金流向的所有数据源均失败: {details}")
+
+        cross_report, secondary_audits, attempts = self._cross_validate_fund_flow(
+            selected["data"], selected_source=selected["source"], providers=providers[selected_index + 1:],
+            symbol=symbol, start_date=start_date, end_date=end_date, attempts=attempts,
+        )
+        selected["quality_report"]["cross_validation"] = cross_report
+        for warning in cross_report.get("warnings", []):
+            if warning not in selected["quality_report"].setdefault("warnings", []):
+                selected["quality_report"]["warnings"].append(warning)
+        if cross_report.get("warnings") and selected["quality_report"].get("status") == "validated":
+            selected["quality_report"]["status"] = "validated_with_warning"
+        return {**selected, "degraded": selected_index > 0, "attempts": attempts, "secondary_audits": secondary_audits}
+
     def search_news(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """按新闻数据源优先级搜索，返回原始响应及路由元数据。"""
         return self._run_with_fallback(
@@ -457,6 +516,40 @@ class DataSourceRouter:
             "details": details,
             "warnings": warnings,
         }, secondary_audits, attempts
+
+    def _cross_validate_fund_flow(
+        self, primary: pd.DataFrame, *, selected_source: str, providers: list[Any], symbol: str,
+        start_date: date, end_date: date, attempts: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+        if not self.cross_validate_market or not providers:
+            return {"status": "skipped", "primary_source": selected_source, "secondary_sources": [], "details": [], "warnings": ["没有执行备用资金流向交叉验证"]}, [], attempts
+        details: list[dict[str, Any]] = []
+        secondary_audits: list[dict[str, Any]] = []
+        for provider in providers:
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(lambda provider=provider: provider.fund_flow(symbol, start_date, end_date))
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{provider_name} 返回空数据")
+                retrieved_at = datetime.now(timezone.utc)
+                normalized = normalize_fund_flow(raw_data, symbol=symbol, source=provider_name, retrieved_at=retrieved_at, start_date=start_date, end_date=end_date, data_version=getattr(provider, "data_version", None))
+                quality = validate_fund_flow(normalized, rejected_data=normalized.attrs.get("rejected_data"), input_rows=normalized.attrs.get("input_rows"), warnings=normalized.attrs.get("normalization_warnings", []), column_mapping=normalized.attrs.get("column_mapping", {}))
+                if quality.data.empty:
+                    raise DataProviderError("备用资金流向质量校验后没有有效记录")
+                comparison = compare_fund_flow(primary, quality.data, primary_source=selected_source, secondary_source=provider_name)
+                details.append(comparison)
+                secondary_audits.append({"source": provider_name, "status": comparison.get("status", "unavailable"), "raw_data": raw_data, "retrieved_at": retrieved_at, "data_version": getattr(provider, "data_version", None), "quality_report": quality.report, "comparison": comparison})
+                attempts.append({"provider": provider_name, "role": "secondary_validation", "ok": True, "retries": retries, "quality_status": quality.report.get("status")})
+            except Exception as exc:  # noqa: BLE001
+                warning = f"备用源 {provider_name} 资金流向交叉验证不可用: {exc}"
+                detail = {"status": "unavailable", "primary_source": selected_source, "secondary_source": provider_name, "common_rows": 0, "metrics": {}, "warnings": [warning]}
+                details.append(detail)
+                secondary_audits.append({"source": provider_name, "status": "unavailable", "raw_data": None, "retrieved_at": datetime.now(timezone.utc), "data_version": getattr(provider, "data_version", None), "quality_report": None, "comparison": detail, "error": str(exc)})
+                attempts.append({"provider": provider_name, "role": "secondary_validation", "ok": False, "error": str(exc), "retryable": self._is_retryable(exc)})
+        statuses = {item.get("status") for item in details}
+        status = "mismatch" if "mismatch" in statuses else "matched" if "matched" in statuses else "unavailable"
+        warnings = list(dict.fromkeys(warning for item in details for warning in item.get("warnings", [])))
+        return {"status": status, "primary_source": selected_source, "secondary_sources": [item.get("secondary_source") for item in details], "details": details, "warnings": warnings}, secondary_audits, attempts
 
     def _run_with_fallback(
         self,

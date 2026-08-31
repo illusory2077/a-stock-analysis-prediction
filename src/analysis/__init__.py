@@ -1,3 +1,4 @@
+from .fund_flow import FUND_FLOW_SCORE_RULES_VERSION, FundFlowResult, evaluate_fund_flow
 from .market_environment import (
     MARKET_ENVIRONMENT_RULES_VERSION,
     MarketEnvironmentError,
@@ -24,6 +25,8 @@ from .prediction import (
 )
 
 __all__ = [
+    "FUND_FLOW_SCORE_RULES_VERSION",
+    "FundFlowResult",
     "GATE_RULES_VERSION",
     "MARKET_ENVIRONMENT_RULES_VERSION",
     "MarketEnvironmentError",
@@ -37,6 +40,7 @@ __all__ = [
     "NextDayPredictionError",
     "NextDayPredictionResult",
     "calculate_technical_indicators",
+    "evaluate_fund_flow",
     "evaluate_market_environment",
     "evaluate_prediction_input",
     "generate_technical_signals",

@@ -251,6 +251,99 @@ def save_next_day_prediction(
     )
     return {"prediction_path": str(prediction_path)}
 
+def save_fund_flow(
+    symbol: str,
+    data: pd.DataFrame,
+    *,
+    source: str,
+    trade_date: date,
+    raw_data: Any | None = None,
+    rejected_data: pd.DataFrame | None = None,
+    quality_report: dict[str, Any] | None = None,
+    retrieved_at: datetime | None = None,
+    data_version: str | None = None,
+    root: Path | None = None,
+) -> dict[str, str]:
+    """保存资金流向原始响应、标准化结果、异常记录和质量元数据。"""
+    root = root or settings.data_dir
+    stamp = _as_utc(retrieved_at or datetime.now(timezone.utc))
+    safe_symbol = _safe_symbol(symbol)
+    date_text = trade_date.isoformat()
+    processed_dir = root / "processed" / "fund_flow"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    base = processed_dir / f"{safe_symbol}_{date_text}"
+    paths: dict[str, str] = {}
+    if raw_data is not None:
+        raw_dir = root / "raw" / "fund_flow" / _safe_component(source) / date_text
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = _non_overwriting_path(raw_dir / f"{safe_symbol}_raw.json", stamp)
+        raw_path.write_text(json.dumps(_jsonable(raw_data), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        paths["raw_path"] = str(raw_path)
+    try:
+        data_path = base.with_suffix(".parquet")
+        data.to_parquet(data_path, index=False)
+    except Exception:  # noqa: BLE001
+        data_path = base.with_suffix(".csv")
+        data.to_csv(data_path, index=False, encoding="utf-8-sig")
+    paths["data_path"] = str(data_path)
+    if rejected_data is not None and not rejected_data.empty:
+        rejected_path = processed_dir / "rejected" / f"{safe_symbol}_{date_text}_rejected.jsonl"
+        rejected_path.parent.mkdir(parents=True, exist_ok=True)
+        with rejected_path.open("w", encoding="utf-8") as handle:
+            for record in rejected_data.to_dict(orient="records"):
+                handle.write(json.dumps(_jsonable(record), ensure_ascii=False, default=str) + "\n")
+        paths["rejected_path"] = str(rejected_path)
+    report = quality_report or {"status": "not_checked", "input_rows": _row_count(data), "output_rows": _row_count(data), "rejected_rows": 0, "warnings": [], "errors": []}
+    quality_path = base.with_name(base.name + "_quality.json")
+    quality_path.write_text(json.dumps(_jsonable(report), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    paths["quality_path"] = str(quality_path)
+    metadata = {"symbol": symbol, "source": source, "trade_date": date_text, "retrieved_at": stamp.isoformat(), "data_version": data_version, "quality_report": report, **paths}
+    metadata_path = base.with_name(base.name + "_metadata.json")
+    metadata_path.write_text(json.dumps(_jsonable(metadata), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    paths["metadata_path"] = str(metadata_path)
+    return paths
+
+
+def save_secondary_fund_flow_audit(
+    symbol: str,
+    source: str,
+    trade_date: date,
+    raw_data: Any | None = None,
+    comparison_report: dict[str, Any] | None = None,
+    *,
+    quality_report: dict[str, Any] | None = None,
+    retrieved_at: datetime | None = None,
+    data_version: str | None = None,
+    error: str | None = None,
+    root: Path | None = None,
+) -> dict[str, str]:
+    """保存备用资金流向原始响应和交叉验证审计。"""
+    root = root or settings.data_dir
+    stamp = _as_utc(retrieved_at or datetime.now(timezone.utc))
+    safe_symbol = _safe_symbol(symbol)
+    safe_source = _safe_component(source)
+    date_text = trade_date.isoformat()
+    paths: dict[str, str] = {}
+    if raw_data is not None:
+        raw_dir = root / "raw" / "fund_flow" / safe_source / date_text
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_path = _non_overwriting_path(raw_dir / f"{safe_symbol}_secondary_raw.json", stamp)
+        payload = {"symbol": symbol, "source": source, "trade_date": date_text, "retrieved_at": stamp.isoformat(), "data_version": data_version, "raw_data": raw_data}
+        raw_path.write_text(json.dumps(_jsonable(payload), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        paths["raw_path"] = str(raw_path)
+    audit_dir = root / "processed" / "fund_flow" / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    audit_path = _non_overwriting_path(audit_dir / f"{safe_symbol}_{date_text}_{safe_source}_cross_validation.json", stamp)
+    payload = {"symbol": symbol, "source": source, "trade_date": date_text, "retrieved_at": stamp.isoformat(), "data_version": data_version, "status": (comparison_report or {}).get("status", "unavailable"), "comparison": comparison_report or {}, "quality_report": quality_report}
+    if paths.get("raw_path"):
+        payload["raw_path"] = paths["raw_path"]
+    if error:
+        payload["error"] = error
+    audit_path.write_text(json.dumps(_jsonable(payload), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    paths["audit_path"] = str(audit_path)
+    return paths
+
+
 def save_secondary_market_audit(
     symbol: str,
     source: str,

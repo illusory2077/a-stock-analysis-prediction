@@ -6,6 +6,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -16,6 +18,7 @@ from src.analysis import (  # noqa: E402
     TechnicalIndicatorError,
     TechnicalSignalError,
     calculate_technical_indicators,
+    evaluate_fund_flow,
     evaluate_market_environment,
     generate_next_day_prediction,
     generate_technical_signals,
@@ -24,8 +27,10 @@ from src.analysis import (  # noqa: E402
 from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
 from src.news import NewsStore, deduplicate_news, normalize_tavily_response  # noqa: E402
 from src.storage import (  # noqa: E402
+    save_fund_flow,
     save_market_data,
     save_next_day_prediction,
+    save_secondary_fund_flow_audit,
     save_secondary_market_audit,
     save_technical_indicators,
     save_technical_signals,
@@ -124,6 +129,40 @@ def main() -> int:
     for symbol in args.symbol:
         try:
             routed = router.fetch_daily_bars(symbol, history_start, trade_date)
+            fund_flow_error = ""
+            fund_flow_result = evaluate_fund_flow(pd.DataFrame(), generated_at=retrieved_at)
+            fund_flow_paths: dict[str, Any] = {}
+            try:
+                fund_flow_route = router.fetch_fund_flow(symbol, history_start, trade_date)
+                fund_flow_result = evaluate_fund_flow(fund_flow_route["data"], generated_at=retrieved_at)
+                secondary_flow_paths: list[dict[str, str]] = []
+                for audit in fund_flow_route.get("secondary_audits", []):
+                    comparison = audit.get("comparison") if isinstance(audit, dict) else None
+                    audit_paths = save_secondary_fund_flow_audit(
+                        symbol, str(audit.get("source", "unknown")), trade_date, audit.get("raw_data"),
+                        comparison if isinstance(comparison, dict) else {},
+                        quality_report=audit.get("quality_report"),
+                        retrieved_at=audit.get("retrieved_at", fund_flow_route.get("retrieved_at", retrieved_at)),
+                        data_version=audit.get("data_version"), error=audit.get("error"),
+                    )
+                    audit["paths"] = audit_paths
+                    secondary_flow_paths.append(audit_paths)
+                fund_flow_paths = save_fund_flow(
+                    symbol, fund_flow_route["data"], source=fund_flow_route["source"], trade_date=trade_date,
+                    raw_data=fund_flow_route.get("raw_data"), rejected_data=fund_flow_route.get("rejected_data"),
+                    quality_report=fund_flow_route.get("quality_report"),
+                    retrieved_at=fund_flow_route.get("retrieved_at", retrieved_at),
+                    data_version=fund_flow_route.get("data_version"),
+                )
+                fund_flow_paths["secondary_audits"] = secondary_flow_paths
+                routed["fund_flow_route"] = fund_flow_route
+            except (DataProviderError, ValueError) as exc:
+                fund_flow_error = str(exc)
+                fund_flow_result.summary.setdefault("warnings", []).append(f"资金行为数据获取失败: {fund_flow_error}")
+                fund_flow_result.summary["warnings"] = list(dict.fromkeys(fund_flow_result.summary["warnings"]))
+            routed["fund_flow"] = fund_flow_result
+            routed["fund_flow_paths"] = fund_flow_paths
+            routed["fund_flow_error"] = fund_flow_error
             gate = evaluate_prediction_input(
                 routed["data"],
                 routed.get("quality_report"),
@@ -183,6 +222,7 @@ def main() -> int:
                                 signal_result,
                                 symbol=symbol,
                                 market_environment=market_environment.to_dimension(),
+                                fund_flow=fund_flow_result.to_dimension(),
                                 generated_at=retrieved_at,
                             )
                             prediction_paths = save_next_day_prediction(
@@ -262,6 +302,7 @@ def main() -> int:
                     "indicator_error": indicator_error,
                     "signal_error": signal_error,
                     "prediction_error": prediction_error,
+                    "fund_flow_error": fund_flow_error,
                 }
             )
         except (DataProviderError, ValueError) as exc:
@@ -363,6 +404,11 @@ def _render_report(
         lines.append(f"- 质量报告：`{result['paths']['quality_path']}`")
         if result["paths"].get("rejected_path"):
             lines.append(f"- 异常行：`{result['paths']['rejected_path']}`")
+        fund_flow_result = route.get("fund_flow")
+        if fund_flow_result is not None:
+            lines.extend(_render_fund_flow_report(fund_flow_result, route.get("fund_flow_paths", {})))
+        elif route.get("fund_flow_error"):
+            lines.append(f"- 资金行为：未获取（{route['fund_flow_error']}）")
         market_environment_result = route.get("market_environment")
         if market_environment_result is not None:
             lines.extend(
@@ -419,6 +465,32 @@ def _render_report(
     lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- 预测必须先通过预测输入质量门禁；`blocked` 数据不得进入预测。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
     return "\n".join(lines)
 
+
+
+def _render_fund_flow_report(fund_flow_result: Any, paths: dict[str, Any]) -> list[str]:
+    """把资金行为评分、数据截止时间和审计路径写入每日报告。"""
+    summary = fund_flow_result.summary
+    score = summary.get("score", fund_flow_result.score)
+    score_text = "NA" if score is None else f"{float(score):+.3f}"
+    lines = ["", "#### 资金行为", ""]
+    lines.append(
+        f"- 资金行为评分：`{score_text}`；状态：`{summary.get('status', 'unknown')}`；"
+        f"数据截止：`{fund_flow_result.data_cutoff or '未知'}`；来源：`{summary.get('source') or '未知'}`"
+    )
+    if summary.get("latest_net_flow_amount") is not None:
+        lines.append(f"- 最新主力净流入：`{summary['latest_net_flow_amount'] / 10000:+.2f} 万元`；强度：`{summary.get('intensity_score', 'NA')}`；连续性：`{summary.get('consistency_score', 'NA')}`")
+    if paths.get("data_path"):
+        lines.append(f"- 资金流向数据：`{paths['data_path']}`")
+    if paths.get("quality_path"):
+        lines.append(f"- 资金流向质量报告：`{paths['quality_path']}`")
+    for audit in paths.get("secondary_audits", []):
+        if audit.get("audit_path"):
+            lines.append(f"- 资金流向备用源审计：`{audit['audit_path']}`")
+    for evidence in summary.get("evidence", []):
+        lines.append(f"- 资金证据：{evidence}")
+    for warning in summary.get("warnings", []):
+        lines.append(f"- 资金警告：{warning}")
+    return lines
 
 
 def _render_market_environment_report(environment_result: Any, paths: dict[str, dict[str, str]]) -> list[str]:
