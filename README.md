@@ -104,3 +104,13 @@ tests/                    自动化测试
 ```
 
 新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，行情和报告分别保存到 `data/processed/market/` 与 `reports/`。 备用行情源的原始响应保存到 `data/raw/market/{source}/{date}/`，主备交叉验证明细保存到 `data/processed/market/audit/`，不可用或不一致状态也会保留错误与待核验信息。
+
+## 预测输入质量门禁
+
+每日行情流水线在保存标准化行情后，会执行预测输入质量门禁，结果写入行情质量报告和每日 Markdown 报告：
+
+- `approved`：主源质量检查通过，且主备交叉验证正常，可以进入预测；
+- `degraded`：主源可用，但存在备用源不可用、交叉验证跳过、路由降级或普通质量警告，可以进入预测但必须降低可信度并保留告警；
+- `blocked`：行情为空、主源质量错误、交易日历异常或主备数据不一致，不得进入预测。
+
+预测入口可以调用 `src.analysis.require_prediction_input`，在 `blocked` 时抛出 `PredictionInputBlockedError`，避免业务逻辑绕过门禁。

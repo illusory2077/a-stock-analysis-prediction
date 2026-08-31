@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.analysis import evaluate_prediction_input  # noqa: E402
 from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
 from src.news import NewsStore, deduplicate_news, normalize_tavily_response  # noqa: E402
 from src.storage import save_market_data, save_secondary_market_audit  # noqa: E402
@@ -37,6 +38,17 @@ def main() -> int:
     for symbol in args.symbol:
         try:
             routed = router.fetch_daily_bars(symbol, trade_date, trade_date)
+            gate = evaluate_prediction_input(
+                routed["data"],
+                routed.get("quality_report"),
+                symbol=symbol,
+                start_date=trade_date,
+                end_date=trade_date,
+                retrieved_at=routed.get("retrieved_at", retrieved_at),
+                route_degraded=bool(routed.get("degraded")),
+            )
+            routed["prediction_quality_gate"] = gate.to_dict()
+            routed.setdefault("quality_report", {})["prediction_quality_gate"] = gate.to_dict()
             secondary_paths: list[dict[str, str]] = []
             for audit in routed.get("secondary_audits", []):
                 comparison = audit.get("comparison") if isinstance(audit, dict) else None
@@ -129,6 +141,15 @@ def _render_report(
         lines.append(f"### {result['symbol']}")
         lines.append(f"- 来源：`{route['source']}`；是否降级：`{route['degraded']}`")
         lines.append(f"- 质量状态：`{quality.get('status', 'unknown')}`；规则版本：`{quality.get('quality_rules_version', 'unknown')}`")
+        gate = route.get("prediction_quality_gate", quality.get("prediction_quality_gate", {}))
+        lines.append(
+            f"- 预测输入门禁：`{gate.get('status', 'unknown')}`；允许进入预测：`{gate.get('can_predict', False)}`；"
+            f"数据截止：`{gate.get('data_cutoff', '未知')}`"
+        )
+        for reason in gate.get("reasons", []):
+            lines.append(f"- 预测阻断原因：{reason}")
+        for warning in gate.get("warnings", []):
+            lines.append(f"- 预测输入警告：{warning}")
         lines.append(f"- 记录数：{len(data) if hasattr(data, '__len__') else '未知'}；拒绝数：`{quality.get('rejected_rows', 0)}`；去重数：`{quality.get('duplicates_removed', 0)}`")
         calendar_validation = quality.get("calendar_validation", {})
         lines.append(
@@ -186,7 +207,7 @@ def _render_report(
             lines.append(f"- [{title}]({item['url']})（发布时间：{item.get('published_at') or '未知'}）")
     else:
         lines.append(f"- 新闻搜索失败：{news_error or '未返回结果'}")
-    lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
+    lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- 预测必须先通过预测输入质量门禁；`blocked` 数据不得进入预测。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
     return "\n".join(lines)
 
 
