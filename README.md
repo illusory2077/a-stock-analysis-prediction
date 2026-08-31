@@ -118,3 +118,22 @@ tests/                    自动化测试
 预测入口可以调用 `src.analysis.require_prediction_input`，在 `blocked` 时抛出 `PredictionInputBlockedError`，避免业务逻辑绕过门禁。
 
 技术指标入口 `src.analysis.calculate_technical_indicators` 会强制执行上述门禁，并计算均线、MACD、RSI、布林带、ATR、滚动支撑/压力位和波动率。技术信号入口 `src.analysis.generate_technical_signals` 将这些指标转换为可解释的趋势、MACD、RSI、布林带、支撑/压力和波动率信号，输出综合方向、信号强度、置信度、触发条件和失效条件；每日流水线会把信号数据保存到 `data/processed/market/signals/` 并写入日报。
+
+## 次日预测层
+
+每日流水线在技术指标和技术信号之后生成次日（T+1）条件性预测：
+
+```python
+from src.analysis import generate_next_day_prediction
+
+prediction = generate_next_day_prediction(
+    technical_signals,
+    symbol="600519.SH",
+)
+```
+
+默认采用四维框架：大盘环境 30%、资金行为 30%、技术面 25%、消息面 15%。当前未接入真实的大盘、资金和新闻评分时，这些维度会明确标记为不可用，不会用默认值或模拟数据填充；有效维度权重会重新归一化，结果会标注数据覆盖率和“技术面覆盖下的条件性估计”。覆盖率不足时置信度会自动封顶，概率是模型估计，不是收益承诺。
+
+预测结果包括方向概率、综合方向、置信度、预期变动、ATR/波动率估算价格区间、触发条件、失效条件、缺失维度和数据质量警告。每日流水线会将结果保存到 `data/processed/market/predictions/`，文件名为 `{symbol}_{trade_date}_next_day_prediction.json`；同一日期重复运行不会覆盖既有结果。
+
+预测链路严格为：行情采集 → 统一标准化 → 数据质量门禁 → 技术指标 → 技术信号 → 次日预测 → 结果存储 → 中文日报。`blocked` 行情不得进入指标、信号或预测；`degraded` 行情可以继续，但必须保留告警并降低置信度。

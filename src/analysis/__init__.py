@@ -11,6 +11,11 @@ from .quality_gate import (
     require_prediction_input,
 )
 from .signals import TechnicalSignalError, TechnicalSignalResult, generate_technical_signals
+from .prediction import (
+    NextDayPredictionError,
+    NextDayPredictionResult,
+    generate_next_day_prediction,
+)
 
 __all__ = [
     "GATE_RULES_VERSION",
@@ -20,8 +25,11 @@ __all__ = [
     "TechnicalIndicatorResult",
     "TechnicalSignalError",
     "TechnicalSignalResult",
+    "NextDayPredictionError",
+    "NextDayPredictionResult",
     "calculate_technical_indicators",
     "evaluate_prediction_input",
     "generate_technical_signals",
+    "generate_next_day_prediction",
     "require_prediction_input",
 ]

@@ -3,7 +3,13 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from src.storage import save_market_data, save_secondary_market_audit, save_technical_indicators, save_technical_signals
+from src.storage import (
+    save_market_data,
+    save_next_day_prediction,
+    save_secondary_market_audit,
+    save_technical_indicators,
+    save_technical_signals,
+)
 
 
 def test_save_market_data_writes_raw_quality_and_rejected(tmp_path) -> None:
@@ -141,3 +147,31 @@ def test_save_technical_signals_writes_data_and_metadata(tmp_path) -> None:
     assert metadata["source"] == "tushare"
     assert metadata["signal_summary"]["direction"] == "bullish"
     assert metadata["quality_gate"]["status"] == "approved"
+
+
+
+def test_save_next_day_prediction_writes_json_without_overwriting(tmp_path) -> None:
+    prediction = {"summary": {"direction": "bullish", "confidence": 0.4}}
+    paths = save_next_day_prediction(
+        "600519.SH",
+        prediction,
+        trade_date=date(2026, 8, 19),
+        source="tushare",
+        retrieved_at=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        root=tmp_path,
+    )
+
+    prediction_path = tmp_path / "processed/market/predictions/600519.SH_2026-08-19_next_day_prediction.json"
+    assert paths["prediction_path"] == str(prediction_path)
+    payload = json.loads(prediction_path.read_text(encoding="utf-8"))
+    assert payload["source"] == "tushare"
+    assert payload["prediction"]["summary"]["direction"] == "bullish"
+
+    second = save_next_day_prediction(
+        "600519.SH",
+        prediction,
+        trade_date=date(2026, 8, 19),
+        source="tushare",
+        root=tmp_path,
+    )
+    assert second["prediction_path"] != paths["prediction_path"]

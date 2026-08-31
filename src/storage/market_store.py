@@ -216,6 +216,41 @@ def save_technical_signals(
     paths["metadata_path"] = str(metadata_path)
     return paths
 
+
+def save_next_day_prediction(
+    symbol: str,
+    prediction: Any,
+    *,
+    trade_date: date,
+    source: str,
+    root: Path | None = None,
+    retrieved_at: datetime | None = None,
+    data_version: str | None = None,
+) -> dict[str, str]:
+    """保存次日预测 JSON 和审计元数据，不覆盖同一日期的既有结果。"""
+    root = root or settings.data_dir
+    stamp = _as_utc(retrieved_at or datetime.now(timezone.utc))
+    safe_symbol = _safe_symbol(symbol)
+    date_text = trade_date.isoformat()
+    processed_dir = root / "processed" / "market" / "predictions"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    base = processed_dir / f"{safe_symbol}_{date_text}_next_day_prediction.json"
+    prediction_path = _non_overwriting_path(base, stamp)
+    payload = prediction.to_dict() if hasattr(prediction, "to_dict") else _jsonable(prediction)
+    record = {
+        "symbol": symbol,
+        "source": source,
+        "trade_date": date_text,
+        "retrieved_at": stamp.isoformat(),
+        "data_version": data_version,
+        "prediction": payload,
+    }
+    prediction_path.write_text(
+        json.dumps(_jsonable(record), ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    return {"prediction_path": str(prediction_path)}
+
 def save_secondary_market_audit(
     symbol: str,
     source: str,

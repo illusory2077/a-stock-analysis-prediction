@@ -7,7 +7,11 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.run_daily_pipeline import _render_report, build_parser
-from src.analysis import calculate_technical_indicators, generate_technical_signals
+from src.analysis import (
+    calculate_technical_indicators,
+    generate_next_day_prediction,
+    generate_technical_signals,
+)
 
 
 def _bars() -> pd.DataFrame:
@@ -51,6 +55,13 @@ def test_parser_exposes_indicator_lookback() -> None:
 def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> None:
     result = calculate_technical_indicators(_bars(), _report(), symbol="600519.SH")
     args = Namespace(symbol=["600519.SH"])
+    signals = generate_technical_signals(result)
+    prediction = generate_next_day_prediction(
+        signals,
+        symbol="600519.SH",
+        target_trade_date=date(2026, 4, 13),
+        generated_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+    )
     route = {
         "source": "test",
         "degraded": False,
@@ -59,8 +70,12 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
         "prediction_quality_gate": result.quality_gate.to_dict(),
         "technical_indicators": result,
         "technical_indicator_paths": {"data_path": "indicators.parquet"},
-        "technical_signals": generate_technical_signals(result),
+        "technical_signals": signals,
         "technical_signal_paths": {"data_path": "signals.parquet", "metadata_path": "signals_metadata.json"},
+        "next_day_prediction": prediction,
+        "next_day_prediction_paths": {
+            "prediction_path": "predictions/600519.SH_2026-04-10_next_day_prediction.json",
+        },
     }
     report = _render_report(
         args,
@@ -79,3 +94,9 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     assert "#### 技术信号" in report
     assert "综合方向：`bullish`" in report
     assert "signals.parquet" in report
+    assert "#### 次日预测" in report
+    assert "方向概率：看多" in report
+    assert "价格区间：`" in report
+    assert "置信度：`" in report
+    assert "预测维度未接入真实数据" in report
+    assert "600519.SH_2026-04-10_next_day_prediction.json" in report

@@ -11,10 +11,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.analysis import (  # noqa: E402
+    NextDayPredictionError,
     PredictionInputBlockedError,
     TechnicalIndicatorError,
     TechnicalSignalError,
     calculate_technical_indicators,
+    generate_next_day_prediction,
     generate_technical_signals,
     evaluate_prediction_input,
 )
@@ -22,6 +24,7 @@ from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
 from src.news import NewsStore, deduplicate_news, normalize_tavily_response  # noqa: E402
 from src.storage import (  # noqa: E402
     save_market_data,
+    save_next_day_prediction,
     save_secondary_market_audit,
     save_technical_indicators,
     save_technical_signals,
@@ -72,6 +75,7 @@ def main() -> int:
             routed.setdefault("quality_report", {})["prediction_quality_gate"] = gate.to_dict()
             indicator_error = ""
             signal_error = ""
+            prediction_error = ""
             if gate.can_predict:
                 try:
                     indicator_result = calculate_technical_indicators(
@@ -109,19 +113,44 @@ def main() -> int:
                         )
                         routed["technical_signals"] = signal_result
                         routed["technical_signal_paths"] = signal_paths
+                        try:
+                            prediction_result = generate_next_day_prediction(
+                                signal_result,
+                                symbol=symbol,
+                                generated_at=retrieved_at,
+                            )
+                            prediction_paths = save_next_day_prediction(
+                                symbol,
+                                prediction_result,
+                                trade_date=trade_date,
+                                source=routed["source"],
+                                retrieved_at=routed.get("retrieved_at", retrieved_at),
+                                data_version=routed.get("data_version"),
+                            )
+                            routed["next_day_prediction"] = prediction_result
+                            routed["next_day_prediction_paths"] = prediction_paths
+                        except (PredictionInputBlockedError, NextDayPredictionError) as exc:
+                            prediction_error = str(exc)
+                            routed["next_day_prediction_error"] = prediction_error
                     except (PredictionInputBlockedError, TechnicalSignalError) as exc:
                         signal_error = str(exc)
+                        prediction_error = "技术信号未生成，跳过次日预测"
                         routed["technical_signal_error"] = signal_error
+                        routed["next_day_prediction_error"] = prediction_error
                 except (PredictionInputBlockedError, TechnicalIndicatorError) as exc:
                     indicator_error = str(exc)
                     signal_error = "技术指标未生成，跳过技术信号计算"
+                    prediction_error = "技术指标未生成，跳过次日预测"
                     routed["technical_indicator_error"] = indicator_error
                     routed["technical_signal_error"] = signal_error
+                    routed["next_day_prediction_error"] = prediction_error
             else:
                 indicator_error = "预测输入门禁为 blocked，跳过技术指标和技术信号计算"
                 signal_error = indicator_error
+                prediction_error = "预测输入门禁为 blocked，跳过次日预测"
                 routed["technical_indicator_error"] = indicator_error
                 routed["technical_signal_error"] = signal_error
+                routed["next_day_prediction_error"] = prediction_error
             secondary_paths: list[dict[str, str]] = []
             for audit in routed.get("secondary_audits", []):
                 comparison = audit.get("comparison") if isinstance(audit, dict) else None
@@ -159,7 +188,16 @@ def main() -> int:
                 data_version=routed.get("data_version"),
             )
             paths["secondary_audits"] = secondary_paths
-            market_results.append({"symbol": symbol, "route": routed, "paths": paths, "indicator_error": indicator_error, "signal_error": signal_error})
+            market_results.append(
+                {
+                    "symbol": symbol,
+                    "route": routed,
+                    "paths": paths,
+                    "indicator_error": indicator_error,
+                    "signal_error": signal_error,
+                    "prediction_error": prediction_error,
+                }
+            )
         except (DataProviderError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
 
@@ -269,6 +307,16 @@ def _render_report(
             lines.extend(_render_signal_report(signal_result, route.get("technical_signal_paths", {})))
         elif result.get("signal_error"):
             lines.append(f"- 技术信号：未计算（{result['signal_error']}）")
+        prediction_result = route.get("next_day_prediction")
+        if prediction_result is not None:
+            lines.extend(
+                _render_prediction_report(
+                    prediction_result,
+                    route.get("next_day_prediction_paths", {}),
+                )
+            )
+        elif result.get("prediction_error"):
+            lines.append(f"- 次日预测：未计算（{result['prediction_error']}）")
         if hasattr(data, "columns"):
             lines.append(f"- 字段：`{', '.join(map(str, data.columns))}`")
             if not data.empty:
@@ -376,6 +424,48 @@ def _render_signal_report(signal_result: Any, paths: dict[str, str]) -> list[str
     for warning in summary.get("warnings", []):
         lines.append(f"- 信号警告：{warning}")
     return lines
+
+
+def _render_prediction_report(prediction_result: Any, paths: dict[str, str]) -> list[str]:
+    """把次日预测的概率、区间和覆盖限制写入每日报告。"""
+    summary = prediction_result.summary
+    probabilities = summary.get("probabilities", {})
+    price_range = summary.get("price_range", {})
+    lines = ["", "#### 次日预测", ""]
+    lines.append(
+        f"- 预测方向：`{summary.get('direction', 'neutral')}`；"
+        f"置信度：`{summary.get('confidence', 0):.3f}`；"
+        f"数据覆盖率：`{summary.get('coverage', 0):.2%}`"
+    )
+    lines.append(
+        f"- 方向概率：看多 `{probabilities.get('bullish', 0):.2%}`；"
+        f"震荡 `{probabilities.get('neutral', 0):.2%}`；"
+        f"看空 `{probabilities.get('bearish', 0):.2%}`"
+    )
+    lines.append(
+        f"- 预期变动：`{summary.get('expected_return_pct', 0):.4f}%`；"
+        f"价格区间：`{price_range.get('lower', 'NA')}` ~ `{price_range.get('upper', 'NA')}`"
+    )
+    lines.append(
+        f"- 预测数据截止：`{prediction_result.data_cutoff or '未知'}`；"
+        f"目标：`{prediction_result.target_trade_date or '下一交易日'}`"
+    )
+    if paths.get("prediction_path"):
+        lines.append(f"- 预测结果：`{paths['prediction_path']}`")
+    for name, component in summary.get("components", {}).items():
+        status = "可用" if component.get("available") else "不可用"
+        lines.append(
+            f"- 预测维度 `{name}`：{status}；基础权重 {component.get('base_weight', 0):.0%}；"
+            f"有效权重 {component.get('effective_weight', 0):.2%}；评分 {component.get('score', 'NA')}"
+        )
+    for warning in summary.get("warnings", []):
+        lines.append(f"- 预测警告：{warning}")
+    for trigger in summary.get("triggers", []):
+        lines.append(f"- 预测触发条件：{trigger}")
+    for invalidation in summary.get("invalidations", []):
+        lines.append(f"- 预测失效条件：{invalidation}")
+    return lines
+
 
 def _format_indicator_value(value: Any) -> str:
     try:
