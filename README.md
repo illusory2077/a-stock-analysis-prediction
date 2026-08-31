@@ -150,6 +150,8 @@ prediction = generate_next_day_prediction(
 
 资金流向原始响应、标准化数据、质量报告和主备审计分别保存到 `data/raw/fund_flow/`、`data/processed/fund_flow/`；日报中的 `#### 资金行为` 会展示评分、最新主力净流入、数据截止时间、证据和告警。资金接口失败时不阻断技术面分析，次日预测会标记资金维度不可用并按可用维度降权。
 
+本阶段新增融资融券和龙虎榜补充证据：`fetch_margin` 使用 Tushare `margin_detail` 为主、AKShare 可用接口为研究型备用；`fetch_dragon_tiger` 使用 Tushare `top_list` 为主、AKShare `stock_lhb_detail_em` 为备用。两类数据均统一字段、检查日期/数值/重复记录、保存原始响应和主备审计，并以资金行为维度的可选子项纳入评分，不会把缺失数据当作 0；Tushare 融资融券/龙虎榜金额按元处理，融券卖出和偿还按股数保留。融资融券原始/处理数据保存在 `data/raw/margin/`、`data/processed/margin/`，龙虎榜对应 `data/raw/dragon_tiger/`、`data/processed/dragon_tiger/`。
+
 
 ### 消息面评分与信息截面
 

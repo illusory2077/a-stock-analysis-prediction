@@ -36,6 +36,10 @@ from src.news import (  # noqa: E402
 )
 from src.storage import (  # noqa: E402
     save_fund_flow,
+    save_margin,
+    save_dragon_tiger,
+    save_secondary_margin_audit,
+    save_secondary_dragon_tiger_audit,
     save_market_data,
     save_next_day_prediction,
     save_secondary_fund_flow_audit,
@@ -173,11 +177,16 @@ def main() -> int:
         try:
             routed = router.fetch_daily_bars(symbol, history_start, trade_date)
             fund_flow_error = ""
+            margin_error = ""
+            dragon_tiger_error = ""
             fund_flow_result = evaluate_fund_flow(pd.DataFrame(), generated_at=retrieved_at)
             fund_flow_paths: dict[str, Any] = {}
+            margin_paths: dict[str, Any] = {}
+            dragon_tiger_paths: dict[str, Any] = {}
+            margin_data = pd.DataFrame()
+            dragon_tiger_data = pd.DataFrame()
             try:
                 fund_flow_route = router.fetch_fund_flow(symbol, history_start, trade_date)
-                fund_flow_result = evaluate_fund_flow(fund_flow_route["data"], generated_at=retrieved_at)
                 secondary_flow_paths: list[dict[str, str]] = []
                 for audit in fund_flow_route.get("secondary_audits", []):
                     comparison = audit.get("comparison") if isinstance(audit, dict) else None
@@ -201,9 +210,49 @@ def main() -> int:
                 routed["fund_flow_route"] = fund_flow_route
             except (DataProviderError, ValueError) as exc:
                 fund_flow_error = str(exc)
-                fund_flow_result.summary.setdefault("warnings", []).append(f"资金行为数据获取失败: {fund_flow_error}")
-                fund_flow_result.summary["warnings"] = list(dict.fromkeys(fund_flow_result.summary["warnings"]))
+
+            try:
+                margin_route = router.fetch_margin(symbol, history_start, trade_date)
+                margin_data = margin_route["data"]
+                margin_audits: list[dict[str, str]] = []
+                for audit in margin_route.get("secondary_audits", []):
+                    comparison = audit.get("comparison") if isinstance(audit, dict) else None
+                    audit_paths = save_secondary_margin_audit(symbol, str(audit.get("source", "unknown")), trade_date, audit.get("raw_data"), comparison if isinstance(comparison, dict) else {}, quality_report=audit.get("quality_report"), retrieved_at=audit.get("retrieved_at", margin_route.get("retrieved_at", retrieved_at)), data_version=audit.get("data_version"), error=audit.get("error"))
+                    audit["paths"] = audit_paths; margin_audits.append(audit_paths)
+                margin_paths = save_margin(symbol, margin_data, source=margin_route["source"], trade_date=trade_date, raw_data=margin_route.get("raw_data"), rejected_data=margin_route.get("rejected_data"), quality_report=margin_route.get("quality_report"), retrieved_at=margin_route.get("retrieved_at", retrieved_at), data_version=margin_route.get("data_version"))
+                margin_paths["secondary_audits"] = margin_audits; routed["margin_route"] = margin_route
+            except (DataProviderError, ValueError) as exc:
+                margin_error = str(exc)
+
+            try:
+                dragon_tiger_route = router.fetch_dragon_tiger(symbol, history_start, trade_date)
+                dragon_tiger_data = dragon_tiger_route["data"]
+                dragon_audits: list[dict[str, str]] = []
+                for audit in dragon_tiger_route.get("secondary_audits", []):
+                    comparison = audit.get("comparison") if isinstance(audit, dict) else None
+                    audit_paths = save_secondary_dragon_tiger_audit(symbol, str(audit.get("source", "unknown")), trade_date, audit.get("raw_data"), comparison if isinstance(comparison, dict) else {}, quality_report=audit.get("quality_report"), retrieved_at=audit.get("retrieved_at", dragon_tiger_route.get("retrieved_at", retrieved_at)), data_version=audit.get("data_version"), error=audit.get("error"))
+                    audit["paths"] = audit_paths; dragon_audits.append(audit_paths)
+                dragon_tiger_paths = save_dragon_tiger(symbol, dragon_tiger_data, source=dragon_tiger_route["source"], trade_date=trade_date, raw_data=dragon_tiger_route.get("raw_data"), rejected_data=dragon_tiger_route.get("rejected_data"), quality_report=dragon_tiger_route.get("quality_report"), retrieved_at=dragon_tiger_route.get("retrieved_at", retrieved_at), data_version=dragon_tiger_route.get("data_version"))
+                dragon_tiger_paths["secondary_audits"] = dragon_audits; routed["dragon_tiger_route"] = dragon_tiger_route
+            except (DataProviderError, ValueError) as exc:
+                dragon_tiger_error = str(exc)
+
+            if "fund_flow_route" in routed:
+                fund_flow_result = evaluate_fund_flow(routed["fund_flow_route"]["data"], margin_data=margin_data, dragon_tiger_data=dragon_tiger_data, generated_at=retrieved_at)
+            else:
+                fund_flow_result = evaluate_fund_flow(pd.DataFrame(), margin_data=margin_data, dragon_tiger_data=dragon_tiger_data, generated_at=retrieved_at)
+            if fund_flow_error:
+                fund_flow_result.summary.setdefault("warnings", []).append(f"资金流向数据获取失败: {fund_flow_error}")
+            if margin_error:
+                fund_flow_result.summary.setdefault("warnings", []).append(f"融资融券数据获取失败: {margin_error}")
+            if dragon_tiger_error:
+                fund_flow_result.summary.setdefault("warnings", []).append(f"龙虎榜数据获取失败: {dragon_tiger_error}")
+            fund_flow_result.summary["warnings"] = list(dict.fromkeys(fund_flow_result.summary.get("warnings", [])))
             routed["fund_flow"] = fund_flow_result
+            routed["margin_paths"] = margin_paths
+            routed["dragon_tiger_paths"] = dragon_tiger_paths
+            routed["margin_error"] = margin_error
+            routed["dragon_tiger_error"] = dragon_tiger_error
             routed["fund_flow_paths"] = fund_flow_paths
             routed["fund_flow_error"] = fund_flow_error
             gate = evaluate_prediction_input(
@@ -438,7 +487,7 @@ def _render_report(
             lines.append(f"- 异常行：`{result['paths']['rejected_path']}`")
         fund_flow_result = route.get("fund_flow")
         if fund_flow_result is not None:
-            lines.extend(_render_fund_flow_report(fund_flow_result, route.get("fund_flow_paths", {})))
+            lines.extend(_render_fund_flow_report(fund_flow_result, route.get("fund_flow_paths", {}), route.get("margin_paths", {}), route.get("dragon_tiger_paths", {})))
         elif route.get("fund_flow_error"):
             lines.append(f"- 资金行为：未获取（{route['fund_flow_error']}）")
         market_environment_result = route.get("market_environment")
@@ -515,7 +564,15 @@ def _render_report(
 
 
 
-def _render_fund_flow_report(fund_flow_result: Any, paths: dict[str, Any]) -> list[str]:
+def _render_fund_flow_report(
+    fund_flow_result: Any,
+    paths: dict[str, Any],
+    margin_paths: dict[str, Any] | None = None,
+    dragon_tiger_paths: dict[str, Any] | None = None,
+    *,
+    margin_error: str = "",
+    dragon_tiger_error: str = "",
+) -> list[str]:
     """把资金行为评分、数据截止时间和审计路径写入每日报告。"""
     summary = fund_flow_result.summary
     score = summary.get("score", fund_flow_result.score)
@@ -534,6 +591,20 @@ def _render_fund_flow_report(fund_flow_result: Any, paths: dict[str, Any]) -> li
     for audit in paths.get("secondary_audits", []):
         if audit.get("audit_path"):
             lines.append(f"- 资金流向备用源审计：`{audit['audit_path']}`")
+    components = summary.get("components", {})
+    for name, label, saved in (("margin", "融资融券", margin_paths or {}), ("dragon_tiger", "龙虎榜", dragon_tiger_paths or {})):
+        item = components.get(name, {})
+        if item.get("available"):
+            score_value = item.get("score")
+            lines.append(f"- {label}补充评分：`{score_value:+.3f}`；数据截止：`{item.get('latest_trade_date', '未知')}`")
+        elif name in {"margin", "dragon_tiger"}:
+            error = margin_error if name == "margin" else dragon_tiger_error
+            suffix = f"；获取失败：{error}" if error else ""
+            lines.append(f"- {label}补充评分：`NA`（数据不可用{suffix}）")
+        if saved.get("data_path"):
+            lines.append(f"- {label}数据：`{saved['data_path']}`")
+        if saved.get("quality_path"):
+            lines.append(f"- {label}质量报告：`{saved['quality_path']}`")
     for evidence in summary.get("evidence", []):
         lines.append(f"- 资金证据：{evidence}")
     for warning in summary.get("warnings", []):

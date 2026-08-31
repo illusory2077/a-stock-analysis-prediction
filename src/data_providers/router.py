@@ -13,8 +13,14 @@ from src.market import (
     TradingCalendar,
     compare_daily_bars,
     compare_fund_flow,
+    compare_dragon_tiger,
+    compare_margin,
+    normalize_dragon_tiger,
     normalize_fund_flow,
+    normalize_margin,
+    validate_dragon_tiger,
     validate_fund_flow,
+    validate_margin,
     normalize_daily_bars,
     validate_daily_bars,
     validate_observed_trade_dates,
@@ -290,6 +296,89 @@ class DataSourceRouter:
         if cross_report.get("warnings") and selected["quality_report"].get("status") == "validated":
             selected["quality_report"]["status"] = "validated_with_warning"
         return {**selected, "degraded": selected_index > 0, "attempts": attempts, "secondary_audits": secondary_audits}
+
+    def fetch_margin(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        """获取融资融券明细，完成标准化、质量检查和主备交叉验证。"""
+        return self._fetch_special(
+            symbol, start_date, end_date,
+            fetch_method="margin", label="融资融券",
+            normalize_fn=normalize_margin, validate_fn=validate_margin,
+            compare_fn=compare_margin,
+        )
+
+    def fetch_dragon_tiger(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        """获取龙虎榜明细，完成标准化、质量检查和主备交叉验证。"""
+        return self._fetch_special(
+            symbol, start_date, end_date,
+            fetch_method="dragon_tiger", label="龙虎榜",
+            normalize_fn=normalize_dragon_tiger, validate_fn=validate_dragon_tiger,
+            compare_fn=compare_dragon_tiger,
+        )
+
+    def _fetch_special(
+        self, symbol: str, start_date: date, end_date: date, *, fetch_method: str,
+        label: str, normalize_fn: Callable[..., pd.DataFrame], validate_fn: Callable[..., Any],
+        compare_fn: Callable[..., dict[str, Any]],
+    ) -> dict[str, Any]:
+        providers = [provider for provider in self.market_providers if callable(getattr(provider, fetch_method, None))]
+        if not providers:
+            raise DataProviderError(f"没有可用的数据源: 获取 {symbol} {label}")
+        attempts: list[dict[str, Any]] = []
+        selected: dict[str, Any] | None = None
+        selected_index = -1
+        for index, provider in enumerate(providers):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(lambda provider=provider: getattr(provider, fetch_method)(symbol, start_date, end_date))
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{provider_name} 返回空数据")
+                retrieved_at = datetime.now(timezone.utc)
+                normalized = normalize_fn(raw_data, symbol=symbol, source=provider_name, retrieved_at=retrieved_at, start_date=start_date, end_date=end_date, data_version=getattr(provider, "data_version", None))
+                quality = validate_fn(normalized, rejected_data=normalized.attrs.get("rejected_data"), input_rows=normalized.attrs.get("input_rows"), warnings=normalized.attrs.get("normalization_warnings", []), column_mapping=normalized.attrs.get("column_mapping", {}))
+                if quality.data.empty:
+                    detail = "; ".join(quality.report.get("errors", [])) or f"没有有效{label}记录"
+                    raise DataProviderError(f"{provider_name} 数据质量校验失败: {detail}")
+                attempts.append({"provider": provider_name, "role": "primary", "ok": True, "retries": retries})
+                selected = {"data": quality.data, "quality_report": quality.report, "raw_data": raw_data, "rejected_data": quality.rejected_data, "retrieved_at": retrieved_at, "source": provider_name, "data_version": getattr(provider, "data_version", None)}
+                selected_index = index
+                break
+            except Exception as exc:  # noqa: BLE001
+                attempts.append({"provider": provider_name, "role": "primary", "ok": False, "error": str(exc), "retryable": self._is_retryable(exc)})
+        if selected is None:
+            details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
+            raise DataProviderError(f"获取 {symbol} {label}的所有数据源均失败: {details}")
+        audits: list[dict[str, Any]] = []
+        details: list[dict[str, Any]] = []
+        if self.cross_validate_market and providers[selected_index + 1:]:
+            for provider in providers[selected_index + 1:]:
+                provider_name = getattr(provider, "name", type(provider).__name__)
+                try:
+                    raw_data, retries = self._call_with_retry(lambda provider=provider: getattr(provider, fetch_method)(symbol, start_date, end_date))
+                    if self._is_empty_result(raw_data):
+                        raise DataProviderError(f"{provider_name} 返回空数据")
+                    secondary_retrieved_at = datetime.now(timezone.utc)
+                    normalized = normalize_fn(raw_data, symbol=symbol, source=provider_name, retrieved_at=secondary_retrieved_at, start_date=start_date, end_date=end_date, data_version=getattr(provider, "data_version", None))
+                    quality = validate_fn(normalized, rejected_data=normalized.attrs.get("rejected_data"), input_rows=normalized.attrs.get("input_rows"), warnings=normalized.attrs.get("normalization_warnings", []), column_mapping=normalized.attrs.get("column_mapping", {}))
+                    comparison = compare_fn(selected["data"], quality.data, primary_source=selected["source"], secondary_source=provider_name, amount_threshold=self.amount_diff_threshold)
+                    details.append(comparison)
+                    audits.append({"source": provider_name, "status": comparison.get("status", "unavailable"), "raw_data": raw_data, "retrieved_at": secondary_retrieved_at, "data_version": getattr(provider, "data_version", None), "quality_report": quality.report, "comparison": comparison})
+                    attempts.append({"provider": provider_name, "role": "secondary_validation", "ok": True, "retries": retries, "quality_status": quality.report.get("status")})
+                except Exception as exc:  # noqa: BLE001
+                    warning = f"备用源 {provider_name} {label}交叉验证不可用: {exc}"
+                    detail = {"status": "unavailable", "primary_source": selected["source"], "secondary_source": provider_name, "common_rows": 0, "metrics": {}, "warnings": [warning]}
+                    details.append(detail)
+                    audits.append({"source": provider_name, "status": "unavailable", "raw_data": None, "retrieved_at": datetime.now(timezone.utc), "data_version": getattr(provider, "data_version", None), "quality_report": None, "comparison": detail, "error": str(exc)})
+                    attempts.append({"provider": provider_name, "role": "secondary_validation", "ok": False, "error": str(exc), "retryable": self._is_retryable(exc)})
+            statuses = {item.get("status") for item in details}
+            cross_status = "mismatch" if "mismatch" in statuses else "matched" if "matched" in statuses else "unavailable"
+            cross_report = {"status": cross_status, "primary_source": selected["source"], "secondary_sources": [item.get("secondary_source") for item in details], "details": details, "warnings": list(dict.fromkeys(w for item in details for w in item.get("warnings", [])))}
+        else:
+            cross_report = {"status": "skipped", "primary_source": selected["source"], "secondary_sources": [], "details": [], "warnings": [f"没有执行备用{label}交叉验证"]}
+        selected["quality_report"]["cross_validation"] = cross_report
+        for warning in cross_report.get("warnings", []):
+            if warning not in selected["quality_report"].setdefault("warnings", []): selected["quality_report"]["warnings"].append(warning)
+        if cross_report.get("warnings") and selected["quality_report"].get("status") == "validated": selected["quality_report"]["status"] = "validated_with_warning"
+        return {**selected, "degraded": selected_index > 0, "attempts": attempts, "secondary_audits": audits}
 
     def search_news(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """按新闻数据源优先级搜索，返回原始响应及路由元数据。"""

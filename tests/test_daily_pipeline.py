@@ -74,7 +74,24 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     args = Namespace(symbol=["600519.SH"])
     signals = generate_technical_signals(result)
     environment = evaluate_market_environment({"000001.SH": _bars()})
-    fund_flow = evaluate_fund_flow(_fund_flow(), generated_at=datetime(2026, 8, 31, tzinfo=timezone.utc))
+    margin = pd.DataFrame({
+        "trade_date": [date(2026, 4, 9), date(2026, 4, 10)],
+        "margin_balance": [100000.0, 120000.0],
+        "short_balance": [50000.0, 48000.0],
+        "source": "test-margin",
+    })
+    dragon_tiger = pd.DataFrame({
+        "trade_date": [date(2026, 4, 10)],
+        "net_buy_amount": [30000.0],
+        "institution_net_amount": [10000.0],
+        "source": "test-dragon",
+    })
+    fund_flow = evaluate_fund_flow(
+        _fund_flow(),
+        margin_data=margin,
+        dragon_tiger_data=dragon_tiger,
+        generated_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+    )
     prediction = generate_next_day_prediction(
         signals,
         market_environment=environment.to_dimension(),
@@ -104,6 +121,14 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
             "secondary_audits": [
                 {"audit_path": "fund_flow/audit/600519.SH_akshare.json"},
             ],
+        },
+        "margin_paths": {
+            "data_path": "margin/600519.SH.parquet",
+            "quality_path": "margin/600519.SH_quality.json",
+        },
+        "dragon_tiger_paths": {
+            "data_path": "dragon_tiger/600519.SH.parquet",
+            "quality_path": "dragon_tiger/600519.SH_quality.json",
         },
         "next_day_prediction": prediction,
         "next_day_prediction_paths": {
@@ -137,6 +162,10 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     assert "fund_flow/600519.SH.parquet" in report
     assert "fund_flow/600519.SH_quality.json" in report
     assert "fund_flow/audit/600519.SH_akshare.json" in report
+    assert "融资融券补充评分：`" in report
+    assert "margin/600519.SH.parquet" in report
+    assert "龙虎榜补充评分：`" in report
+    assert "dragon_tiger/600519.SH.parquet" in report
     assert "#### 次日预测" in report
     assert "方向概率：看多" in report
     assert "fund_flow" in report
