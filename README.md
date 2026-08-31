@@ -103,7 +103,9 @@ tests/                    自动化测试
 .\.venv\Scripts\python.exe scripts/run_daily_pipeline.py --symbol 600519.SH
 ```
 
-新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，行情和报告分别保存到 `data/processed/market/` 与 `reports/`。 备用行情源的原始响应保存到 `data/raw/market/{source}/{date}/`，主备交叉验证明细保存到 `data/processed/market/audit/`，不可用或不一致状态也会保留错误与待核验信息。
+每日流水线默认向目标交易日前回看 120 个自然日，以保证 MA、MACD、RSI、布林带和 ATR 等长周期指标有足够历史数据；可用 `--lookback-days 0` 恢复仅获取目标日。
+
+新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，标准行情、技术指标和报告分别保存到 `data/processed/market/`、`data/processed/market/indicators/` 与 `reports/`。备用行情源的原始响应保存到 `data/raw/market/{source}/{date}/`，主备交叉验证明细保存到 `data/processed/market/audit/`，不可用或不一致状态也会保留错误与待核验信息。
 
 ## 预测输入质量门禁
 
@@ -114,3 +116,5 @@ tests/                    自动化测试
 - `blocked`：行情为空、主源质量错误、交易日历异常或主备数据不一致，不得进入预测。
 
 预测入口可以调用 `src.analysis.require_prediction_input`，在 `blocked` 时抛出 `PredictionInputBlockedError`，避免业务逻辑绕过门禁。
+
+技术指标入口 `src.analysis.calculate_technical_indicators` 会强制执行上述门禁，并计算均线、MACD、RSI、布林带、ATR、滚动支撑/压力位和波动率。

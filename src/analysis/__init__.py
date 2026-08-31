@@ -1,5 +1,8 @@
-"""分析和预测前置检查。"""
-
+from .indicators import (
+    TechnicalIndicatorError,
+    TechnicalIndicatorResult,
+    calculate_technical_indicators,
+)
 from .quality_gate import (
     GATE_RULES_VERSION,
     PredictionInputBlockedError,
@@ -12,6 +15,9 @@ __all__ = [
     "GATE_RULES_VERSION",
     "PredictionInputBlockedError",
     "QualityGateResult",
+    "TechnicalIndicatorError",
+    "TechnicalIndicatorResult",
+    "calculate_technical_indicators",
     "evaluate_prediction_input",
     "require_prediction_input",
 ]

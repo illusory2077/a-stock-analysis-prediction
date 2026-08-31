@@ -150,3 +150,14 @@ def test_require_prediction_input_raises_for_blocked_data() -> None:
         assert exc.result.status == "blocked"
     else:
         raise AssertionError("blocked 输入未抛出 PredictionInputBlockedError")
+
+
+def test_quality_gate_blocks_multiple_symbols_for_single_prediction() -> None:
+    bars = pd.concat([_bars(), _bars().assign(symbol="000001.SZ")], ignore_index=True)
+    result = evaluate_prediction_input(
+        bars,
+        _report(),
+    )
+
+    assert result.status == "blocked"
+    assert any("多个标的" in item for item in result.reasons)

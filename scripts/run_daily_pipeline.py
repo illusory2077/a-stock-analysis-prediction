@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,16 +10,31 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.analysis import evaluate_prediction_input  # noqa: E402
+from src.analysis import (  # noqa: E402
+    PredictionInputBlockedError,
+    TechnicalIndicatorError,
+    calculate_technical_indicators,
+    evaluate_prediction_input,
+)
 from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
 from src.news import NewsStore, deduplicate_news, normalize_tavily_response  # noqa: E402
-from src.storage import save_market_data, save_secondary_market_audit  # noqa: E402
+from src.storage import (  # noqa: E402
+    save_market_data,
+    save_secondary_market_audit,
+    save_technical_indicators,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="运行每日行情、新闻和报告流水线")
     parser.add_argument("--symbol", nargs="+", required=True, help="标的代码，例如 600519.SH")
     parser.add_argument("--date", default=date.today().isoformat(), help="交易日期，默认今天，格式 YYYY-MM-DD")
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=120,
+        help="技术指标历史回看天数，默认 120 个自然日；设为 0 仅获取目标日",
+    )
     parser.add_argument("--query", default="A股市场 财经新闻", help="新闻搜索关键词")
     parser.add_argument("--news-time-range", choices=("day", "week", "month", "year"), default="day")
     parser.add_argument("--max-news", type=int, default=10)
@@ -30,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     trade_date = date.fromisoformat(args.date)
+    if args.lookback_days < 0:
+        raise ValueError("--lookback-days 必须是非负整数")
+    history_start = trade_date - timedelta(days=args.lookback_days)
     retrieved_at = datetime.now(timezone.utc)
     router = DataSourceRouter()
     market_results: list[dict[str, Any]] = []
@@ -37,18 +55,48 @@ def main() -> int:
 
     for symbol in args.symbol:
         try:
-            routed = router.fetch_daily_bars(symbol, trade_date, trade_date)
+            routed = router.fetch_daily_bars(symbol, history_start, trade_date)
             gate = evaluate_prediction_input(
                 routed["data"],
                 routed.get("quality_report"),
                 symbol=symbol,
-                start_date=trade_date,
+                start_date=history_start,
                 end_date=trade_date,
                 retrieved_at=routed.get("retrieved_at", retrieved_at),
                 route_degraded=bool(routed.get("degraded")),
             )
             routed["prediction_quality_gate"] = gate.to_dict()
             routed.setdefault("quality_report", {})["prediction_quality_gate"] = gate.to_dict()
+            indicator_error = ""
+            if gate.can_predict:
+                try:
+                    indicator_result = calculate_technical_indicators(
+                        routed["data"],
+                        routed.get("quality_report"),
+                        symbol=symbol,
+                        start_date=history_start,
+                        end_date=trade_date,
+                        retrieved_at=routed.get("retrieved_at", retrieved_at),
+                        route_degraded=bool(routed.get("degraded")),
+                    )
+                    indicator_paths = save_technical_indicators(
+                        symbol,
+                        indicator_result.data,
+                        source=routed["source"],
+                        trade_date=trade_date,
+                        indicator_summary=indicator_result.summary,
+                        quality_gate=indicator_result.quality_gate.to_dict(),
+                        retrieved_at=routed.get("retrieved_at", retrieved_at),
+                        data_version=routed.get("data_version"),
+                    )
+                    routed["technical_indicators"] = indicator_result
+                    routed["technical_indicator_paths"] = indicator_paths
+                except (PredictionInputBlockedError, TechnicalIndicatorError) as exc:
+                    indicator_error = str(exc)
+                    routed["technical_indicator_error"] = indicator_error
+            else:
+                indicator_error = "预测输入门禁为 blocked，跳过技术指标计算"
+                routed["technical_indicator_error"] = indicator_error
             secondary_paths: list[dict[str, str]] = []
             for audit in routed.get("secondary_audits", []):
                 comparison = audit.get("comparison") if isinstance(audit, dict) else None
@@ -83,9 +131,10 @@ def main() -> int:
                 rejected_data=routed.get("rejected_data"),
                 quality_report=routed.get("quality_report"),
                 retrieved_at=routed.get("retrieved_at", retrieved_at),
+                data_version=routed.get("data_version"),
             )
             paths["secondary_audits"] = secondary_paths
-            market_results.append({"symbol": symbol, "route": routed, "paths": paths})
+            market_results.append({"symbol": symbol, "route": routed, "paths": paths, "indicator_error": indicator_error})
         except (DataProviderError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
 
@@ -140,6 +189,9 @@ def _render_report(
         quality = route.get("quality_report", {})
         lines.append(f"### {result['symbol']}")
         lines.append(f"- 来源：`{route['source']}`；是否降级：`{route['degraded']}`")
+        gate_checks = route.get("prediction_quality_gate", {}).get("checks", {})
+        data_range = gate_checks.get("requested_range", {})
+        lines.append(f"- 指标历史请求区间：`{data_range.get('start_date', '未知')}` 至 `{data_range.get('end_date', '未知')}`")
         lines.append(f"- 质量状态：`{quality.get('status', 'unknown')}`；规则版本：`{quality.get('quality_rules_version', 'unknown')}`")
         gate = route.get("prediction_quality_gate", quality.get("prediction_quality_gate", {}))
         lines.append(
@@ -182,6 +234,11 @@ def _render_report(
         lines.append(f"- 质量报告：`{result['paths']['quality_path']}`")
         if result["paths"].get("rejected_path"):
             lines.append(f"- 异常行：`{result['paths']['rejected_path']}`")
+        indicator_result = route.get("technical_indicators")
+        if indicator_result is not None:
+            lines.extend(_render_indicator_report(indicator_result, route.get("technical_indicator_paths", {})))
+        elif result.get("indicator_error"):
+            lines.append(f"- 技术指标：未计算（{result['indicator_error']}）")
         if hasattr(data, "columns"):
             lines.append(f"- 字段：`{', '.join(map(str, data.columns))}`")
             if not data.empty:
@@ -209,6 +266,55 @@ def _render_report(
         lines.append(f"- 新闻搜索失败：{news_error or '未返回结果'}")
     lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- 预测必须先通过预测输入质量门禁；`blocked` 数据不得进入预测。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])
     return "\n".join(lines)
+
+
+
+def _render_indicator_report(indicator_result: Any, paths: dict[str, str]) -> list[str]:
+    """把技术指标最新值和可用性摘要写入每日报告。"""
+    summary = indicator_result.summary
+    lines = ["", "#### 技术指标", ""]
+    lines.append(f"- 历史记录数：`{summary.get('history_rows', 0)}`；指标列数：`{len(summary.get('indicator_columns', []))}`")
+    lines.append(f"- 指标门禁：`{indicator_result.quality_gate.status}`；数据截止：`{summary.get('latest_trade_date', '未知')}`")
+    if paths.get("data_path"):
+        lines.append(f"- 指标数据：`{paths['data_path']}`")
+    if paths.get("metadata_path"):
+        lines.append(f"- 指标元数据：`{paths['metadata_path']}`")
+
+    data = indicator_result.data
+    if not data.empty:
+        latest = data.iloc[-1]
+        preferred = (
+            "ma_5",
+            "ma_20",
+            "ma_60",
+            "macd_dif",
+            "macd_dea",
+            "macd_hist",
+            "rsi_6",
+            "rsi_14",
+            "bollinger_upper_20",
+            "bollinger_lower_20",
+            "atr_14",
+            "support_20",
+            "resistance_20",
+            "return_1d",
+            "volatility_20",
+        )
+        values = [f"{column}={_format_indicator_value(latest[column])}" for column in preferred if column in data]
+        if values:
+            lines.append(f"- 最新指标（{latest.get('trade_date', '未知')}）：" + "；".join(values))
+    for warning in summary.get("warnings", []):
+        lines.append(f"- 指标警告：{warning}")
+    return lines
+
+
+def _format_indicator_value(value: Any) -> str:
+    try:
+        if value is None or value != value:
+            return "NA"
+        return f"{float(value):.6f}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 if __name__ == "__main__":

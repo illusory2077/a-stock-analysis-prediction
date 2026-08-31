@@ -98,6 +98,7 @@ class DataSourceRouter:
                     "rejected_data": quality.rejected_data,
                     "retrieved_at": retrieved_at,
                     "source": provider_name,
+                    "data_version": getattr(provider, "data_version", None),
                 }
                 selected_index = index
                 break

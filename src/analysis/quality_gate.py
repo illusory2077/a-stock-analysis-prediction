@@ -88,6 +88,8 @@ def evaluate_prediction_input(
     if not frame.empty and "symbol" in frame.columns:
         symbols = sorted({str(value) for value in frame["symbol"].dropna()})
         checks["symbols"] = symbols
+        if len(symbols) > 1:
+            reasons.append(f"预测输入包含多个标的，不能作为单标的预测输入: {', '.join(symbols)}")
         if symbol and any(value != symbol for value in symbols):
             reasons.append(f"行情标的与请求不一致: 请求 {symbol}，实际 {', '.join(symbols)}")
         if not symbols:

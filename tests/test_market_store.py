@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from src.storage import save_market_data, save_secondary_market_audit
+from src.storage import save_market_data, save_secondary_market_audit, save_technical_indicators
 
 
 def test_save_market_data_writes_raw_quality_and_rejected(tmp_path) -> None:
@@ -95,3 +95,26 @@ def test_save_secondary_market_audit_records_unavailable_without_raw(tmp_path) -
     payload = json.loads((tmp_path / "processed/market/audit/600519.SH_2026-08-19_akshare_cross_validation.json").read_text(encoding="utf-8"))
     assert payload["status"] == "unavailable"
     assert payload["error"] == "接口失败"
+
+
+def test_save_technical_indicators_writes_data_and_metadata(tmp_path) -> None:
+    data = pd.DataFrame(
+        [{"symbol": "600519.SH", "trade_date": date(2026, 8, 19), "close": 100.0, "ma_5": 99.0}]
+    )
+    paths = save_technical_indicators(
+        "600519.SH",
+        data,
+        source="tushare",
+        trade_date=date(2026, 8, 19),
+        indicator_summary={"history_rows": 1, "warnings": []},
+        quality_gate={"status": "approved", "can_predict": True},
+        data_version="test-v1",
+        root=tmp_path,
+    )
+
+    assert paths["data_path"].endswith(".parquet")
+    assert (tmp_path / "processed/market/indicators/600519.SH_2026-08-19_technical_indicators.parquet").exists()
+    metadata = json.loads((tmp_path / "processed/market/indicators/600519.SH_2026-08-19_technical_indicators_metadata.json").read_text(encoding="utf-8"))
+    assert metadata["source"] == "tushare"
+    assert metadata["data_version"] == "test-v1"
+    assert metadata["quality_gate"]["status"] == "approved"
