@@ -16,6 +16,7 @@ from src.analysis import (  # noqa: E402
     TechnicalIndicatorError,
     TechnicalSignalError,
     calculate_technical_indicators,
+    evaluate_market_environment,
     generate_next_day_prediction,
     generate_technical_signals,
     evaluate_prediction_input,
@@ -59,6 +60,67 @@ def main() -> int:
     market_results: list[dict[str, Any]] = []
     failures: list[str] = []
 
+    index_symbols = ("000001.SH", "000300.SH", "399006.SZ")
+    index_routes: dict[str, dict[str, Any]] = {}
+    index_failures: list[str] = []
+    for index_symbol in index_symbols:
+        try:
+            index_routes[index_symbol] = router.fetch_index_bars(index_symbol, history_start, trade_date)
+        except DataProviderError as exc:
+            index_failures.append(f"{index_symbol}: {exc}")
+    market_environment = evaluate_market_environment(
+        {symbol: route["data"] for symbol, route in index_routes.items()},
+        generated_at=retrieved_at,
+    )
+    if index_failures:
+        market_environment.summary.setdefault("warnings", []).extend(
+            [f"大盘指数获取失败: {failure}" for failure in index_failures]
+        )
+        market_environment.summary["warnings"] = list(dict.fromkeys(market_environment.summary["warnings"]))
+        if market_environment.summary.get("status") == "validated":
+            market_environment.summary["status"] = "validated_with_warning"
+
+    market_environment_paths: dict[str, dict[str, str]] = {}
+    for index_symbol, route in index_routes.items():
+        secondary_paths: list[dict[str, str]] = []
+        for audit in route.get("secondary_audits", []):
+            comparison = audit.get("comparison") if isinstance(audit, dict) else None
+            audit_paths = save_secondary_market_audit(
+                index_symbol,
+                str(audit.get("source", "unknown")),
+                trade_date,
+                audit.get("raw_data"),
+                comparison if isinstance(comparison, dict) else {},
+                quality_report=audit.get("quality_report"),
+                retrieved_at=audit.get("retrieved_at", route.get("retrieved_at", retrieved_at)),
+                data_version=audit.get("data_version"),
+                error=audit.get("error"),
+            )
+            audit["paths"] = audit_paths
+            if isinstance(comparison, dict):
+                comparison.update(
+                    {
+                        "raw_path": audit_paths.get("raw_path"),
+                        "audit_path": audit_paths.get("audit_path"),
+                        "retrieved_at": audit.get("retrieved_at"),
+                    }
+                )
+            secondary_paths.append(audit_paths)
+        route["secondary_audit_paths"] = secondary_paths
+        market_environment_paths[index_symbol] = save_market_data(
+            index_symbol,
+            route["data"],
+            source=route["source"],
+            trade_date=trade_date,
+            raw_data=route.get("raw_data"),
+            rejected_data=route.get("rejected_data"),
+            quality_report=route.get("quality_report"),
+            retrieved_at=route.get("retrieved_at", retrieved_at),
+            data_version=route.get("data_version"),
+            frequency="1d",
+            price_adjustment="none",
+        )
+        market_environment_paths[index_symbol]["secondary_audits"] = secondary_paths
     for symbol in args.symbol:
         try:
             routed = router.fetch_daily_bars(symbol, history_start, trade_date)
@@ -73,6 +135,9 @@ def main() -> int:
             )
             routed["prediction_quality_gate"] = gate.to_dict()
             routed.setdefault("quality_report", {})["prediction_quality_gate"] = gate.to_dict()
+            routed["market_environment"] = market_environment
+            routed["market_environment_routes"] = index_routes
+            routed["market_environment_paths"] = market_environment_paths
             indicator_error = ""
             signal_error = ""
             prediction_error = ""
@@ -117,6 +182,7 @@ def main() -> int:
                             prediction_result = generate_next_day_prediction(
                                 signal_result,
                                 symbol=symbol,
+                                market_environment=market_environment.to_dimension(),
                                 generated_at=retrieved_at,
                             )
                             prediction_paths = save_next_day_prediction(
@@ -297,6 +363,14 @@ def _render_report(
         lines.append(f"- 质量报告：`{result['paths']['quality_path']}`")
         if result["paths"].get("rejected_path"):
             lines.append(f"- 异常行：`{result['paths']['rejected_path']}`")
+        market_environment_result = route.get("market_environment")
+        if market_environment_result is not None:
+            lines.extend(
+                _render_market_environment_report(
+                    market_environment_result,
+                    route.get("market_environment_paths", {}),
+                )
+            )
         indicator_result = route.get("technical_indicators")
         if indicator_result is not None:
             lines.extend(_render_indicator_report(indicator_result, route.get("technical_indicator_paths", {})))
@@ -346,6 +420,39 @@ def _render_report(
     return "\n".join(lines)
 
 
+
+def _render_market_environment_report(environment_result: Any, paths: dict[str, dict[str, str]]) -> list[str]:
+    """把大盘环境评分、指数证据和数据路径写入每日报告。"""
+    summary = environment_result.summary
+    lines = ["", "#### 大盘环境", ""]
+    score = summary.get("score", environment_result.score)
+    score_text = "NA" if score is None else f"{float(score):+.3f}"
+    lines.append(
+        f"- 环境评分：`{score_text}`；状态：`{summary.get('status', 'unknown')}`；"
+        f"数据截止：`{environment_result.data_cutoff or '未知'}`；来源：`{summary.get('source') or '未知'}`"
+    )
+    breadth = summary.get("breadth", {})
+    if breadth.get("available"):
+        lines.append(
+            f"- 市场宽度：上涨家数 `{breadth.get('advancing')}`；"
+            f"下跌家数 `{breadth.get('declining')}`；评分 `{breadth.get('score', 'NA')}`"
+        )
+    for symbol, item in summary.get("indices", {}).items():
+        lines.append(
+            f"- 指数 `{item.get('label', symbol)}`："
+            f"评分 `{item.get('score', 'NA')}`；5日涨跌 `{item.get('return_5d', 'NA')}`；"
+            f"最新交易日 `{item.get('latest_trade_date', '未知')}`"
+        )
+        saved = paths.get(symbol, {})
+        if saved.get("data_path"):
+            lines.append(f"  - 指数行情：`{saved['data_path']}`")
+        if saved.get("raw_path"):
+            lines.append(f"  - 指数原始数据：`{saved['raw_path']}`")
+    for evidence in summary.get("evidence", []):
+        lines.append(f"- 大盘证据：{evidence}")
+    for warning in summary.get("warnings", []):
+        lines.append(f"- 大盘环境警告：{warning}")
+    return lines
 
 def _render_indicator_report(indicator_result: Any, paths: dict[str, str]) -> list[str]:
     """把技术指标最新值和可用性摘要写入每日报告。"""

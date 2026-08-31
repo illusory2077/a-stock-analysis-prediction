@@ -32,6 +32,16 @@ class TushareProvider(DataProvider):
             fields="exchange,cal_date,is_open,pretrade_date",
         )
 
+    def index_daily_bars(self, symbol: str, start_date: date, end_date: date) -> Any:
+        """获取指数日线；symbol 使用 Tushare 代码，如 000001.SH。"""
+        client = self._client()
+        return client.index_daily(
+            ts_code=symbol,
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+        )
+
     def healthcheck(self) -> dict[str, Any]:
         try:
             self._client()

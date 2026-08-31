@@ -1,3 +1,9 @@
+from .market_environment import (
+    MARKET_ENVIRONMENT_RULES_VERSION,
+    MarketEnvironmentError,
+    MarketEnvironmentResult,
+    evaluate_market_environment,
+)
 from .indicators import (
     TechnicalIndicatorError,
     TechnicalIndicatorResult,
@@ -19,6 +25,9 @@ from .prediction import (
 
 __all__ = [
     "GATE_RULES_VERSION",
+    "MARKET_ENVIRONMENT_RULES_VERSION",
+    "MarketEnvironmentError",
+    "MarketEnvironmentResult",
     "PredictionInputBlockedError",
     "QualityGateResult",
     "TechnicalIndicatorError",
@@ -28,6 +37,7 @@ __all__ = [
     "NextDayPredictionError",
     "NextDayPredictionResult",
     "calculate_technical_indicators",
+    "evaluate_market_environment",
     "evaluate_prediction_input",
     "generate_technical_signals",
     "generate_next_day_prediction",

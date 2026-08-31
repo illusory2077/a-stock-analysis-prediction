@@ -140,6 +140,98 @@ class DataSourceRouter:
             "secondary_audits": secondary_audits,
         }
 
+    def fetch_index_bars(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
+        """获取指数日线，使用支持 ``index_daily_bars`` 的行情供应商。"""
+        providers = [
+            provider
+            for provider in self.market_providers
+            if callable(getattr(provider, "index_daily_bars", None))
+        ]
+        if not providers:
+            raise DataProviderError(f"没有可用的数据源: 获取 {symbol} 指数日线")
+
+        attempts: list[dict[str, Any]] = []
+        selected: dict[str, Any] | None = None
+        selected_index = -1
+        for index, provider in enumerate(providers):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(
+                    lambda provider=provider: provider.index_daily_bars(symbol, start_date, end_date)
+                )
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{provider_name} 返回空数据")
+                retrieved_at = datetime.now(timezone.utc)
+                normalized, quality = self._normalize_and_validate(
+                    raw_data,
+                    symbol=symbol,
+                    provider_name=provider_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                    retrieved_at=retrieved_at,
+                    asset_type="index",
+                )
+                normalized, quality = self._apply_calendar_validation(
+                    normalized,
+                    quality,
+                    provider,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if quality.data.empty:
+                    detail = "; ".join(quality.report.get("errors", [])) or "没有有效指数行情记录"
+                    raise DataProviderError(f"{provider_name} 数据质量校验失败: {detail}")
+                attempts.append({"provider": provider_name, "role": "primary", "ok": True, "retries": retries})
+                selected = {
+                    "data": quality.data,
+                    "quality_report": quality.report,
+                    "raw_data": raw_data,
+                    "rejected_data": quality.rejected_data,
+                    "retrieved_at": retrieved_at,
+                    "source": provider_name,
+                    "data_version": getattr(provider, "data_version", None),
+                }
+                selected_index = index
+                break
+            except Exception as exc:  # noqa: BLE001
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "role": "primary",
+                        "ok": False,
+                        "error": str(exc),
+                        "retryable": self._is_retryable(exc),
+                    }
+                )
+
+        if selected is None:
+            details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
+            raise DataProviderError(f"获取 {symbol} 指数日线的所有数据源均失败: {details}")
+
+        cross_report, secondary_audits, attempts = self._cross_validate_secondary(
+            selected["data"],
+            selected_source=selected["source"],
+            providers=providers[selected_index + 1 :],
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            attempts=attempts,
+            fetch_method="index_daily_bars",
+            asset_type="index",
+        )
+        selected["quality_report"]["cross_validation"] = cross_report
+        for warning in cross_report.get("warnings", []):
+            if warning not in selected["quality_report"].setdefault("warnings", []):
+                selected["quality_report"]["warnings"].append(warning)
+        if cross_report.get("warnings") and selected["quality_report"].get("status") == "validated":
+            selected["quality_report"]["status"] = "validated_with_warning"
+
+        return {
+            **selected,
+            "degraded": selected_index > 0,
+            "attempts": attempts,
+            "secondary_audits": secondary_audits,
+        }
     def search_news(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """按新闻数据源优先级搜索，返回原始响应及路由元数据。"""
         return self._run_with_fallback(
@@ -173,6 +265,7 @@ class DataSourceRouter:
         start_date: date,
         end_date: date,
         retrieved_at: datetime,
+        asset_type: str | None = None,
     ) -> tuple[pd.DataFrame, Any]:
         normalized = normalize_daily_bars(
             raw_data,
@@ -181,6 +274,7 @@ class DataSourceRouter:
             retrieved_at=retrieved_at,
             start_date=start_date,
             end_date=end_date,
+            asset_type=asset_type,
         )
         quality = validate_daily_bars(
             normalized,
@@ -251,6 +345,8 @@ class DataSourceRouter:
         start_date: date,
         end_date: date,
         attempts: list[dict[str, Any]],
+        fetch_method: str = "daily_bars",
+        asset_type: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         if not self.cross_validate_market or not providers:
             return {
@@ -267,7 +363,7 @@ class DataSourceRouter:
             provider_name = getattr(provider, "name", type(provider).__name__)
             try:
                 raw_data, retries = self._call_with_retry(
-                    lambda provider=provider: provider.daily_bars(symbol, start_date, end_date)
+                    lambda provider=provider: getattr(provider, fetch_method)(symbol, start_date, end_date)
                 )
                 if self._is_empty_result(raw_data):
                     raise DataProviderError(f"{provider_name} 返回空数据")
@@ -279,6 +375,7 @@ class DataSourceRouter:
                     start_date=start_date,
                     end_date=end_date,
                     retrieved_at=secondary_retrieved_at,
+                    asset_type=asset_type,
                 )
                 comparison = compare_daily_bars(
                     primary,

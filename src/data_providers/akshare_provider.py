@@ -12,6 +12,18 @@ class AkshareProvider(DataProvider):
 
     name = "akshare"
 
+    def index_daily_bars(self, symbol: str, start_date: date, end_date: date) -> Any:
+        """获取 A 股指数日线；AKShare 使用 sh000001/sz399006 形式的代码。"""
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise DataProviderError("未安装 akshare") from exc
+
+        code = symbol.upper().split(".", 1)[0]
+        exchange = symbol.upper().rsplit(".", 1)[-1] if "." in symbol else ""
+        ak_symbol = ("sh" if exchange in {"SH", "SSE"} or code.startswith("000") else "sz") + code
+        return ak.stock_zh_index_daily(symbol=ak_symbol)
+
     def healthcheck(self) -> dict[str, Any]:
         try:
             import akshare  # noqa: F401

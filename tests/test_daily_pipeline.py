@@ -9,6 +9,7 @@ import pandas as pd
 from scripts.run_daily_pipeline import _render_report, build_parser
 from src.analysis import (
     calculate_technical_indicators,
+    evaluate_market_environment,
     generate_next_day_prediction,
     generate_technical_signals,
 )
@@ -56,8 +57,10 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     result = calculate_technical_indicators(_bars(), _report(), symbol="600519.SH")
     args = Namespace(symbol=["600519.SH"])
     signals = generate_technical_signals(result)
+    environment = evaluate_market_environment({"000001.SH": _bars()})
     prediction = generate_next_day_prediction(
         signals,
+        market_environment=environment.to_dimension(),
         symbol="600519.SH",
         target_trade_date=date(2026, 4, 13),
         generated_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
@@ -72,6 +75,10 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
         "technical_indicator_paths": {"data_path": "indicators.parquet"},
         "technical_signals": signals,
         "technical_signal_paths": {"data_path": "signals.parquet", "metadata_path": "signals_metadata.json"},
+        "market_environment": environment,
+        "market_environment_paths": {
+            "000001.SH": {"data_path": "market/000001.SH.parquet"},
+        },
         "next_day_prediction": prediction,
         "next_day_prediction_paths": {
             "prediction_path": "predictions/600519.SH_2026-04-10_next_day_prediction.json",
@@ -94,6 +101,10 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     assert "#### 技术信号" in report
     assert "综合方向：`bullish`" in report
     assert "signals.parquet" in report
+    assert "#### 大盘环境" in report
+    assert "环境评分：`" in report
+    assert "上证指数" in report
+    assert "market/000001.SH.parquet" in report
     assert "#### 次日预测" in report
     assert "方向概率：看多" in report
     assert "价格区间：`" in report
