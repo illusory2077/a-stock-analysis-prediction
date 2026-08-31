@@ -104,6 +104,22 @@ def _render_report(
         lines.append(f"- 来源：`{route['source']}`；是否降级：`{route['degraded']}`")
         lines.append(f"- 质量状态：`{quality.get('status', 'unknown')}`；规则版本：`{quality.get('quality_rules_version', 'unknown')}`")
         lines.append(f"- 记录数：{len(data) if hasattr(data, '__len__') else '未知'}；拒绝数：`{quality.get('rejected_rows', 0)}`；去重数：`{quality.get('duplicates_removed', 0)}`")
+        calendar_validation = quality.get("calendar_validation", {})
+        lines.append(
+            f"- 交易日历校验：`{calendar_validation.get('status', 'unknown')}`"
+            + (f"；交易所：`{calendar_validation.get('exchange')}`" if calendar_validation.get("exchange") else "")
+        )
+        cross_validation = quality.get("cross_validation", {})
+        lines.append(f"- 主备交叉验证：`{cross_validation.get('status', 'unknown')}`")
+        for detail in cross_validation.get("details", []):
+            metrics = detail.get("metrics", {})
+            metric_text = ", ".join(
+                f"{field}最大差异 {values.get('max_diff_pct'):.4f}% / 阈值 {values.get('threshold_pct'):.4f}%"
+                for field, values in metrics.items()
+                if values.get("max_diff_pct") is not None
+            )
+            if metric_text:
+                lines.append(f"  - 备用源 `{detail.get('secondary_source', 'unknown')}`：{metric_text}")
         lines.append(f"- 保存文件：`{result['paths']['data_path']}`")
         if result["paths"].get("raw_path"):
             lines.append(f"- 原始数据：`{result['paths']['raw_path']}`")

@@ -1,15 +1,22 @@
-"""行情标准化与质量检查。"""
+"""行情标准化、质量检查、交易日历和交叉验证。"""
 
+from .calendar import CalendarError, CalendarValidationResult, TradingCalendar, validate_observed_trade_dates
+from .cross_validator import compare_daily_bars
 from .normalizer import MarketNormalizationError, normalize_daily_bars
 from .quality import QualityResult, validate_daily_bars
 from .schema import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, STANDARD_COLUMNS
 
 __all__ = [
+    "CalendarError",
+    "CalendarValidationResult",
     "MarketNormalizationError",
     "OPTIONAL_COLUMNS",
     "QualityResult",
     "REQUIRED_COLUMNS",
     "STANDARD_COLUMNS",
+    "TradingCalendar",
+    "compare_daily_bars",
     "normalize_daily_bars",
     "validate_daily_bars",
+    "validate_observed_trade_dates",
 ]

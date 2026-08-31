@@ -22,6 +22,16 @@ class TushareProvider(DataProvider):
 
         return ts.pro_api(self.token)
 
+    def trade_calendar(self, start_date: date, end_date: date, *, exchange: str = "SSE") -> Any:
+        """获取交易日历；exchange 使用 SSE/SZSE/BSE 等统一市场代码。"""
+        client = self._client()
+        return client.trade_cal(
+            exchange=exchange,
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d"),
+            fields="exchange,cal_date,is_open,pretrade_date",
+        )
+
     def healthcheck(self) -> dict[str, Any]:
         try:
             self._client()

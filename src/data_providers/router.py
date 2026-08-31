@@ -5,8 +5,17 @@ from collections.abc import Callable, Iterable
 from datetime import date, datetime, timezone
 from typing import Any
 
+import pandas as pd
+
 from config.settings import settings
-from src.market import normalize_daily_bars, validate_daily_bars
+from src.market import (
+    CalendarError,
+    TradingCalendar,
+    compare_daily_bars,
+    normalize_daily_bars,
+    validate_daily_bars,
+    validate_observed_trade_dates,
+)
 from .akshare_provider import AkshareProvider
 from .base import DataProvider, DataProviderError
 from .tavily_provider import TavilyProvider
@@ -14,7 +23,7 @@ from .tushare_provider import TushareProvider
 
 
 class DataSourceRouter:
-    """按优先级调用数据源，并在可重试失败后自动降级。"""
+    """按优先级调用数据源，完成标准化、质量检查和主备交叉验证。"""
 
     def __init__(
         self,
@@ -22,17 +31,31 @@ class DataSourceRouter:
         market_providers: Iterable[DataProvider] | None = None,
         news_providers: Iterable[Any] | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
+        cross_validate_market: bool = True,
+        validate_calendar: bool = True,
+        calendar: TradingCalendar | None = None,
+        close_diff_threshold: float = 0.005,
+        volume_diff_threshold: float = 0.02,
+        amount_diff_threshold: float = 0.02,
     ) -> None:
         self.market_providers = list(market_providers) if market_providers is not None else self._default_market_providers()
         self.news_providers = list(news_providers) if news_providers is not None else self._default_news_providers()
         self.sleep_fn = sleep_fn
+        self.cross_validate_market = cross_validate_market
+        self.validate_calendar = validate_calendar
+        self.calendar = calendar
+        self.close_diff_threshold = close_diff_threshold
+        self.volume_diff_threshold = volume_diff_threshold
+        self.amount_diff_threshold = amount_diff_threshold
 
     def fetch_daily_bars(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
-        """获取日线，统一标准化并执行质量检查后返回。"""
+        """获取日线，统一标准化、检查交易日，再用备用源交叉验证。"""
         if not self.market_providers:
             raise DataProviderError(f"没有可用的数据源: 获取 {symbol} 日线")
 
         attempts: list[dict[str, Any]] = []
+        selected: dict[str, Any] | None = None
+        selected_index = -1
         for index, provider in enumerate(self.market_providers):
             provider_name = getattr(provider, "name", type(provider).__name__)
             try:
@@ -42,47 +65,71 @@ class DataSourceRouter:
                 if self._is_empty_result(raw_data):
                     raise DataProviderError(f"{provider_name} 返回空数据")
                 retrieved_at = datetime.now(timezone.utc)
-                normalized = normalize_daily_bars(
+                normalized, quality = self._normalize_and_validate(
                     raw_data,
                     symbol=symbol,
-                    source=provider_name,
-                    retrieved_at=retrieved_at,
+                    provider_name=provider_name,
                     start_date=start_date,
                     end_date=end_date,
+                    retrieved_at=retrieved_at,
                 )
-                quality = validate_daily_bars(
+                normalized, quality = self._apply_calendar_validation(
                     normalized,
-                    rejected_data=normalized.attrs.get("rejected_data"),
-                    input_rows=normalized.attrs.get("input_rows"),
-                    warnings=normalized.attrs.get("normalization_warnings", []),
-                    column_mapping=normalized.attrs.get("column_mapping", {}),
+                    quality,
+                    provider,
+                    start_date=start_date,
+                    end_date=end_date,
                 )
                 if quality.data.empty:
                     detail = "; ".join(quality.report.get("errors", [])) or "没有有效行情记录"
                     raise DataProviderError(f"{provider_name} 数据质量校验失败: {detail}")
-                attempts.append({"provider": provider_name, "ok": True, "retries": retries})
-                return {
+                attempts.append({"provider": provider_name, "role": "primary", "ok": True, "retries": retries})
+                selected = {
                     "data": quality.data,
-                    "source": provider_name,
-                    "degraded": index > 0,
-                    "attempts": attempts,
                     "quality_report": quality.report,
                     "raw_data": raw_data,
                     "rejected_data": quality.rejected_data,
                     "retrieved_at": retrieved_at,
+                    "source": provider_name,
                 }
+                selected_index = index
+                break
             except Exception as exc:  # noqa: BLE001
                 attempts.append(
                     {
                         "provider": provider_name,
+                        "role": "primary",
                         "ok": False,
                         "error": str(exc),
                         "retryable": self._is_retryable(exc),
                     }
                 )
 
-        details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
-        raise DataProviderError(f"获取 {symbol} 日线的所有数据源均失败: {details}")
+        if selected is None:
+            details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
+            raise DataProviderError(f"获取 {symbol} 日线的所有数据源均失败: {details}")
+
+        cross_report, attempts = self._cross_validate_secondary(
+            selected["data"],
+            selected_source=selected["source"],
+            providers=self.market_providers[selected_index + 1 :],
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            attempts=attempts,
+        )
+        selected["quality_report"]["cross_validation"] = cross_report
+        for warning in cross_report.get("warnings", []):
+            if warning not in selected["quality_report"].setdefault("warnings", []):
+                selected["quality_report"]["warnings"].append(warning)
+        if cross_report.get("warnings") and selected["quality_report"].get("status") == "validated":
+            selected["quality_report"]["status"] = "validated_with_warning"
+
+        return {
+            **selected,
+            "degraded": selected_index > 0,
+            "attempts": attempts,
+        }
 
     def search_news(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """按新闻数据源优先级搜索，返回原始响应及路由元数据。"""
@@ -107,6 +154,179 @@ class DataSourceRouter:
                     }
                 )
         return checks
+
+    def _normalize_and_validate(
+        self,
+        raw_data: Any,
+        *,
+        symbol: str,
+        provider_name: str,
+        start_date: date,
+        end_date: date,
+        retrieved_at: datetime,
+    ) -> tuple[pd.DataFrame, Any]:
+        normalized = normalize_daily_bars(
+            raw_data,
+            symbol=symbol,
+            source=provider_name,
+            retrieved_at=retrieved_at,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        quality = validate_daily_bars(
+            normalized,
+            rejected_data=normalized.attrs.get("rejected_data"),
+            input_rows=normalized.attrs.get("input_rows"),
+            warnings=normalized.attrs.get("normalization_warnings", []),
+            column_mapping=normalized.attrs.get("column_mapping", {}),
+        )
+        if quality.data.empty:
+            detail = "; ".join(quality.report.get("errors", [])) or "没有有效行情记录"
+            raise DataProviderError(f"{provider_name} 数据质量校验失败: {detail}")
+        return quality.data, quality
+
+    def _apply_calendar_validation(
+        self,
+        data: pd.DataFrame,
+        quality: Any,
+        provider: Any,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[pd.DataFrame, Any]:
+        if not self.validate_calendar:
+            quality.report["calendar_validation"] = {"status": "skipped", "reason": "已关闭交易日历校验"}
+            return data, quality
+        calendar = self.calendar or TradingCalendar(provider)
+        exchange = str(data["exchange"].dropna().iloc[0]) if "exchange" in data and not data["exchange"].dropna().empty else "SSE"
+        try:
+            open_days = calendar.open_days(start_date, end_date, exchange=exchange)
+        except CalendarError as exc:
+            quality.report["calendar_validation"] = {
+                "status": "unavailable",
+                "exchange": exchange,
+                "warnings": [str(exc)],
+            }
+            return data, quality
+        calendar_result = validate_observed_trade_dates(
+            data,
+            open_days=open_days,
+            requested_start=start_date,
+            requested_end=end_date,
+        )
+        if not calendar_result.rejected_data.empty:
+            quality.rejected_data = _concat_frames(quality.rejected_data, calendar_result.rejected_data)
+            quality.report["output_rows"] = len(calendar_result.data)
+            quality.report["rejected_rows"] = len(quality.rejected_data)
+            quality.report["warnings"] = list(
+                dict.fromkeys([*quality.report.get("warnings", []), *calendar_result.report.get("warnings", [])])
+            )
+            if calendar_result.data.empty:
+                quality.report["status"] = "rejected"
+            elif quality.report.get("status") == "validated":
+                quality.report["status"] = "validated_with_warning"
+        quality.report["calendar_validation"] = {
+            **calendar_result.report,
+            "exchange": exchange,
+        }
+        quality.data = calendar_result.data
+        return calendar_result.data, quality
+
+    def _cross_validate_secondary(
+        self,
+        primary: pd.DataFrame,
+        *,
+        selected_source: str,
+        providers: list[Any],
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        attempts: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if not self.cross_validate_market or not providers:
+            return {
+                "status": "skipped",
+                "primary_source": selected_source,
+                "secondary_sources": [],
+                "details": [],
+                "warnings": ["没有执行备用行情源交叉验证"],
+            }, attempts
+
+        details: list[dict[str, Any]] = []
+        for provider in providers:
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            try:
+                raw_data, retries = self._call_with_retry(
+                    lambda provider=provider: provider.daily_bars(symbol, start_date, end_date)
+                )
+                if self._is_empty_result(raw_data):
+                    raise DataProviderError(f"{provider_name} 返回空数据")
+                normalized, quality = self._normalize_and_validate(
+                    raw_data,
+                    symbol=symbol,
+                    provider_name=provider_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                    retrieved_at=datetime.now(timezone.utc),
+                )
+                comparison = compare_daily_bars(
+                    primary,
+                    quality.data,
+                    primary_source=selected_source,
+                    secondary_source=provider_name,
+                    close_threshold=self.close_diff_threshold,
+                    volume_threshold=self.volume_diff_threshold,
+                    amount_threshold=self.amount_diff_threshold,
+                )
+                details.append(comparison)
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "role": "secondary_validation",
+                        "ok": True,
+                        "retries": retries,
+                        "quality_status": quality.report.get("status"),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                warning = f"备用源 {provider_name} 交叉验证不可用: {exc}"
+                details.append(
+                    {
+                        "status": "unavailable",
+                        "primary_source": selected_source,
+                        "secondary_source": provider_name,
+                        "compared_rows": 0,
+                        "missing_primary_rows": 0,
+                        "missing_secondary_rows": 0,
+                        "metrics": {},
+                        "warnings": [warning],
+                    }
+                )
+                attempts.append(
+                    {
+                        "provider": provider_name,
+                        "role": "secondary_validation",
+                        "ok": False,
+                        "error": str(exc),
+                        "retryable": self._is_retryable(exc),
+                    }
+                )
+
+        statuses = {item.get("status") for item in details}
+        if "mismatch" in statuses:
+            status = "mismatch"
+        elif "matched" in statuses:
+            status = "matched"
+        else:
+            status = "unavailable"
+        warnings = list(dict.fromkeys(warning for item in details for warning in item.get("warnings", [])))
+        return {
+            "status": status,
+            "primary_source": selected_source,
+            "secondary_sources": [item.get("secondary_source") for item in details],
+            "details": details,
+            "warnings": warnings,
+        }, attempts
 
     def _run_with_fallback(
         self,
@@ -205,3 +425,12 @@ class DataSourceRouter:
             return [TavilyProvider()]
         except DataProviderError:
             return []
+
+
+def _concat_frames(left: pd.DataFrame, right: pd.DataFrame) -> pd.DataFrame:
+    parts = [frame.copy() for frame in (left, right) if frame is not None and not frame.empty]
+    if not parts:
+        return pd.DataFrame(columns=[*left.columns, *right.columns])
+    result = pd.concat(parts, ignore_index=True, sort=False)
+    result.attrs = {}
+    return result
