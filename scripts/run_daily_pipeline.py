@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
 from src.news import NewsStore, deduplicate_news, normalize_tavily_response  # noqa: E402
-from src.storage import save_market_data  # noqa: E402
+from src.storage import save_market_data, save_secondary_market_audit  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +37,31 @@ def main() -> int:
     for symbol in args.symbol:
         try:
             routed = router.fetch_daily_bars(symbol, trade_date, trade_date)
+            secondary_paths: list[dict[str, str]] = []
+            for audit in routed.get("secondary_audits", []):
+                comparison = audit.get("comparison") if isinstance(audit, dict) else None
+                audit_paths = save_secondary_market_audit(
+                    symbol,
+                    str(audit.get("source", "unknown")),
+                    trade_date,
+                    audit.get("raw_data"),
+                    comparison if isinstance(comparison, dict) else {},
+                    quality_report=audit.get("quality_report"),
+                    retrieved_at=audit.get("retrieved_at", routed.get("retrieved_at", retrieved_at)),
+                    data_version=audit.get("data_version"),
+                    error=audit.get("error"),
+                )
+                audit["paths"] = audit_paths
+                if isinstance(comparison, dict):
+                    comparison.update(
+                        {
+                            "raw_path": audit_paths.get("raw_path"),
+                            "audit_path": audit_paths.get("audit_path"),
+                            "retrieved_at": audit.get("retrieved_at"),
+                        }
+                    )
+                secondary_paths.append(audit_paths)
+
             paths = save_market_data(
                 symbol,
                 routed["data"],
@@ -47,6 +72,7 @@ def main() -> int:
                 quality_report=routed.get("quality_report"),
                 retrieved_at=routed.get("retrieved_at", retrieved_at),
             )
+            paths["secondary_audits"] = secondary_paths
             market_results.append({"symbol": symbol, "route": routed, "paths": paths})
         except (DataProviderError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
@@ -120,6 +146,15 @@ def _render_report(
             )
             if metric_text:
                 lines.append(f"  - 备用源 `{detail.get('secondary_source', 'unknown')}`：{metric_text}")
+            lines.append(
+                f"  - 状态：`{detail.get('status', 'unknown')}`；获取时间：`{detail.get('retrieved_at', 'unknown')}`"
+            )
+            if detail.get("raw_path"):
+                lines.append(f"  - 备用源原始响应：`{detail['raw_path']}`")
+            if detail.get("audit_path"):
+                lines.append(f"  - 交叉验证明细：`{detail['audit_path']}`")
+            for warning in detail.get("warnings", []):
+                lines.append(f"  - 待核验警告：{warning}")
         lines.append(f"- 保存文件：`{result['paths']['data_path']}`")
         if result["paths"].get("raw_path"):
             lines.append(f"- 原始数据：`{result['paths']['raw_path']}`")

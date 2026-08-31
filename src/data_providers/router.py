@@ -31,22 +31,28 @@ class DataSourceRouter:
         market_providers: Iterable[DataProvider] | None = None,
         news_providers: Iterable[Any] | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
-        cross_validate_market: bool = True,
-        validate_calendar: bool = True,
+        cross_validate_market: bool | None = None,
+        validate_calendar: bool | None = None,
         calendar: TradingCalendar | None = None,
-        close_diff_threshold: float = 0.005,
-        volume_diff_threshold: float = 0.02,
-        amount_diff_threshold: float = 0.02,
+        close_diff_threshold: float | None = None,
+        volume_diff_threshold: float | None = None,
+        amount_diff_threshold: float | None = None,
     ) -> None:
         self.market_providers = list(market_providers) if market_providers is not None else self._default_market_providers()
         self.news_providers = list(news_providers) if news_providers is not None else self._default_news_providers()
         self.sleep_fn = sleep_fn
-        self.cross_validate_market = cross_validate_market
-        self.validate_calendar = validate_calendar
+        self.cross_validate_market = settings.market_cross_validate if cross_validate_market is None else cross_validate_market
+        self.validate_calendar = settings.market_validate_calendar if validate_calendar is None else validate_calendar
         self.calendar = calendar
-        self.close_diff_threshold = close_diff_threshold
-        self.volume_diff_threshold = volume_diff_threshold
-        self.amount_diff_threshold = amount_diff_threshold
+        self.close_diff_threshold = (
+            settings.market_close_diff_threshold if close_diff_threshold is None else close_diff_threshold
+        )
+        self.volume_diff_threshold = (
+            settings.market_volume_diff_threshold if volume_diff_threshold is None else volume_diff_threshold
+        )
+        self.amount_diff_threshold = (
+            settings.market_amount_diff_threshold if amount_diff_threshold is None else amount_diff_threshold
+        )
 
     def fetch_daily_bars(self, symbol: str, start_date: date, end_date: date) -> dict[str, Any]:
         """获取日线，统一标准化、检查交易日，再用备用源交叉验证。"""
@@ -65,6 +71,7 @@ class DataSourceRouter:
                 if self._is_empty_result(raw_data):
                     raise DataProviderError(f"{provider_name} 返回空数据")
                 retrieved_at = datetime.now(timezone.utc)
+                secondary_retrieved_at = datetime.now(timezone.utc)
                 normalized, quality = self._normalize_and_validate(
                     raw_data,
                     symbol=symbol,
@@ -109,7 +116,7 @@ class DataSourceRouter:
             details = "; ".join(f"{item['provider']}: {item.get('error', 'failed')}" for item in attempts)
             raise DataProviderError(f"获取 {symbol} 日线的所有数据源均失败: {details}")
 
-        cross_report, attempts = self._cross_validate_secondary(
+        cross_report, secondary_audits, attempts = self._cross_validate_secondary(
             selected["data"],
             selected_source=selected["source"],
             providers=self.market_providers[selected_index + 1 :],
@@ -129,6 +136,7 @@ class DataSourceRouter:
             **selected,
             "degraded": selected_index > 0,
             "attempts": attempts,
+            "secondary_audits": secondary_audits,
         }
 
     def search_news(self, query: str, **kwargs: Any) -> dict[str, Any]:
@@ -242,7 +250,7 @@ class DataSourceRouter:
         start_date: date,
         end_date: date,
         attempts: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
         if not self.cross_validate_market or not providers:
             return {
                 "status": "skipped",
@@ -250,9 +258,10 @@ class DataSourceRouter:
                 "secondary_sources": [],
                 "details": [],
                 "warnings": ["没有执行备用行情源交叉验证"],
-            }, attempts
+            }, [], attempts
 
         details: list[dict[str, Any]] = []
+        secondary_audits: list[dict[str, Any]] = []
         for provider in providers:
             provider_name = getattr(provider, "name", type(provider).__name__)
             try:
@@ -261,13 +270,14 @@ class DataSourceRouter:
                 )
                 if self._is_empty_result(raw_data):
                     raise DataProviderError(f"{provider_name} 返回空数据")
+                secondary_retrieved_at = datetime.now(timezone.utc)
                 normalized, quality = self._normalize_and_validate(
                     raw_data,
                     symbol=symbol,
                     provider_name=provider_name,
                     start_date=start_date,
                     end_date=end_date,
-                    retrieved_at=datetime.now(timezone.utc),
+                    retrieved_at=secondary_retrieved_at,
                 )
                 comparison = compare_daily_bars(
                     primary,
@@ -279,6 +289,17 @@ class DataSourceRouter:
                     amount_threshold=self.amount_diff_threshold,
                 )
                 details.append(comparison)
+                secondary_audits.append(
+                    {
+                        "source": provider_name,
+                        "status": comparison.get("status", "unavailable"),
+                        "raw_data": raw_data,
+                        "retrieved_at": secondary_retrieved_at,
+                        "data_version": getattr(provider, "data_version", None),
+                        "quality_report": quality.report,
+                        "comparison": comparison,
+                    }
+                )
                 attempts.append(
                     {
                         "provider": provider_name,
@@ -290,16 +311,27 @@ class DataSourceRouter:
                 )
             except Exception as exc:  # noqa: BLE001
                 warning = f"备用源 {provider_name} 交叉验证不可用: {exc}"
-                details.append(
+                unavailable_detail = {
+                    "status": "unavailable",
+                    "primary_source": selected_source,
+                    "secondary_source": provider_name,
+                    "compared_rows": 0,
+                    "missing_primary_rows": 0,
+                    "missing_secondary_rows": 0,
+                    "metrics": {},
+                    "warnings": [warning],
+                }
+                details.append(unavailable_detail)
+                secondary_audits.append(
                     {
+                        "source": provider_name,
                         "status": "unavailable",
-                        "primary_source": selected_source,
-                        "secondary_source": provider_name,
-                        "compared_rows": 0,
-                        "missing_primary_rows": 0,
-                        "missing_secondary_rows": 0,
-                        "metrics": {},
-                        "warnings": [warning],
+                        "raw_data": None,
+                        "retrieved_at": datetime.now(timezone.utc),
+                        "data_version": getattr(provider, "data_version", None),
+                        "quality_report": None,
+                        "comparison": unavailable_detail,
+                        "error": str(exc),
                     }
                 )
                 attempts.append(
@@ -326,7 +358,7 @@ class DataSourceRouter:
             "secondary_sources": [item.get("secondary_source") for item in details],
             "details": details,
             "warnings": warnings,
-        }, attempts
+        }, secondary_audits, attempts
 
     def _run_with_fallback(
         self,

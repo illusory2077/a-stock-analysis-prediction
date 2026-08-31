@@ -100,6 +100,72 @@ def save_market_data(
     return paths
 
 
+def save_secondary_market_audit(
+    symbol: str,
+    source: str,
+    trade_date: date,
+    raw_data: Any | None = None,
+    comparison_report: dict[str, Any] | None = None,
+    *,
+    quality_report: dict[str, Any] | None = None,
+    retrieved_at: datetime | None = None,
+    data_version: str | None = None,
+    error: str | None = None,
+    root: Path | None = None,
+) -> dict[str, str]:
+    """保存备用行情源原始响应和主备交叉验证明细，形成可追溯审计链路。"""
+    root = root or settings.data_dir
+    stamp = _as_utc(retrieved_at or datetime.now(timezone.utc))
+    safe_symbol = _safe_symbol(symbol)
+    safe_source = _safe_component(source)
+    date_text = trade_date.isoformat()
+    paths: dict[str, str] = {}
+
+    if raw_data is not None:
+        raw_dir = root / "raw" / "market" / safe_source / date_text
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        raw_base = raw_dir / f"{safe_symbol}_secondary_raw.json"
+        raw_path = _non_overwriting_path(raw_base, stamp)
+        raw_payload = {
+            "symbol": symbol,
+            "source": source,
+            "trade_date": date_text,
+            "retrieved_at": stamp.isoformat(),
+            "data_version": data_version,
+            "raw_data": raw_data,
+        }
+        raw_path.write_text(
+            json.dumps(_jsonable(raw_payload), ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        paths["raw_path"] = str(raw_path)
+
+    audit_dir = root / "processed" / "market" / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    audit_base = audit_dir / f"{safe_symbol}_{date_text}_{safe_source}_cross_validation.json"
+    audit_path = _non_overwriting_path(audit_base, stamp)
+    audit_payload: dict[str, Any] = {
+        "symbol": symbol,
+        "source": source,
+        "trade_date": date_text,
+        "retrieved_at": stamp.isoformat(),
+        "data_version": data_version,
+        "status": (comparison_report or {}).get("status", "unavailable"),
+        "comparison": comparison_report or {},
+        "quality_report": quality_report,
+    }
+    if paths.get("raw_path"):
+        audit_payload["raw_path"] = paths["raw_path"]
+    if error:
+        audit_payload["error"] = error
+    audit_path.write_text(
+        json.dumps(_jsonable(audit_payload), ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    paths["audit_path"] = str(audit_path)
+    return paths
+
+
 def _safe_symbol(value: str) -> str:
     return _safe_component(value.replace("/", "_").replace("\\", "_"))
 
@@ -111,7 +177,13 @@ def _safe_component(value: str) -> str:
 def _non_overwriting_path(base: Path, stamp: datetime) -> Path:
     if not base.exists():
         return base
-    return base.with_name(f"{base.stem}_{stamp.strftime('%Y%m%dT%H%M%S%fZ')}{base.suffix}")
+    suffix = stamp.strftime('%Y%m%dT%H%M%S%fZ')
+    candidate = base.with_name(f"{base.stem}_{suffix}{base.suffix}")
+    counter = 1
+    while candidate.exists():
+        candidate = base.with_name(f"{base.stem}_{suffix}_{counter}{base.suffix}")
+        counter += 1
+    return candidate
 
 
 def _as_utc(value: datetime) -> datetime:

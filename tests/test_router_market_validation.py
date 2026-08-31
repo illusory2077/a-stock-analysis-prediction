@@ -85,6 +85,9 @@ def test_router_cross_validates_secondary_and_keeps_primary_on_mismatch() -> Non
     assert result["quality_report"]["cross_validation"]["status"] == "mismatch"
     assert result["quality_report"]["status"] == "validated_with_warning"
     assert any(item["role"] == "secondary_validation" and item["ok"] for item in result["attempts"])
+    assert result["secondary_audits"][0]["source"] == "akshare"
+    assert result["secondary_audits"][0]["status"] == "mismatch"
+    assert result["secondary_audits"][0]["raw_data"][0]["close"] == 102
 
 
 def test_router_marks_unavailable_secondary_without_discarding_primary() -> None:
@@ -96,3 +99,6 @@ def test_router_marks_unavailable_secondary_without_discarding_primary() -> None
     assert len(result["data"]) == 1
     assert result["quality_report"]["cross_validation"]["status"] == "unavailable"
     assert result["quality_report"]["cross_validation"]["details"][0]["secondary_source"] == "akshare"
+    assert result["secondary_audits"][0]["status"] == "unavailable"
+    assert result["secondary_audits"][0]["raw_data"] is None
+    assert result["secondary_audits"][0]["error"] == "akshare unavailable"

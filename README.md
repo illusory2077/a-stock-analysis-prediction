@@ -23,6 +23,13 @@ ALPHAVANTAGE_KEY=你的Alpha Vantage Key
 TAVILY_API_KEY=你的Tavily API Key
 POLYGON_API_KEY=你的Polygon Key
 SEC_USER_AGENT=AStockAnalysis your_email@example.com
+
+# 行情质量校验
+MARKET_CROSS_VALIDATE=true
+MARKET_VALIDATE_CALENDAR=true
+MARKET_CLOSE_DIFF_THRESHOLD=0.005
+MARKET_VOLUME_DIFF_THRESHOLD=0.02
+MARKET_AMOUNT_DIFF_THRESHOLD=0.02
 ```
 
 其中：
@@ -32,7 +39,10 @@ SEC_USER_AGENT=AStockAnalysis your_email@example.com
 - `ALPHAVANTAGE_KEY`：全球低频行情，可选；
 - `TAVILY_API_KEY`：新闻搜索和网页研究，可选；
 - `POLYGON_API_KEY`：美股实时行情，可选；
-- `SEC_USER_AGENT`：SEC EDGAR 请求标识，不是密钥。
+- `SEC_USER_AGENT`：SEC EDGAR 请求标识，不是密钥；
+- `MARKET_CROSS_VALIDATE`：是否启用主备行情交叉验证；
+- `MARKET_VALIDATE_CALENDAR`：是否启用交易日历校验；
+- `MARKET_CLOSE_DIFF_THRESHOLD`、`MARKET_VOLUME_DIFF_THRESHOLD`、`MARKET_AMOUNT_DIFF_THRESHOLD`：主备数据差异阈值，使用小数比例表示。
 
 ### 3. 验证配置
 
@@ -93,4 +103,4 @@ tests/                    自动化测试
 .\.venv\Scripts\python.exe scripts/run_daily_pipeline.py --symbol 600519.SH
 ```
 
-新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，行情和报告分别保存到 `data/processed/market/` 与 `reports/`。
+新闻原始响应保存到 `data/raw/news/`，标准化新闻保存到 `data/processed/news/`，行情和报告分别保存到 `data/processed/market/` 与 `reports/`。 备用行情源的原始响应保存到 `data/raw/market/{source}/{date}/`，主备交叉验证明细保存到 `data/processed/market/audit/`，不可用或不一致状态也会保留错误与待核验信息。

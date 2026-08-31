@@ -1,8 +1,9 @@
-from datetime import date
+import json
+from datetime import date, datetime, timezone
 
 import pandas as pd
 
-from src.storage import save_market_data
+from src.storage import save_market_data, save_secondary_market_audit
 
 
 def test_save_market_data_writes_raw_quality_and_rejected(tmp_path) -> None:
@@ -34,3 +35,63 @@ def test_save_market_data_writes_raw_quality_and_rejected(tmp_path) -> None:
         raw_data=[{"raw": "second"}],
     )
     assert second["raw_path"] != paths["raw_path"]
+
+
+def test_save_secondary_market_audit_writes_wrapped_raw_and_comparison(tmp_path) -> None:
+    retrieved_at = datetime(2026, 8, 19, 8, 30, tzinfo=timezone.utc)
+    comparison = {
+        "status": "mismatch",
+        "secondary_source": "akshare",
+        "metrics": {"close": {"max_diff_pct": 2.0, "threshold_pct": 0.5}},
+    }
+    paths = save_secondary_market_audit(
+        "600519.SH",
+        "akshare",
+        date(2026, 8, 19),
+        [{"日期": "2026-08-19", "收盘": 100}],
+        comparison,
+        quality_report={"status": "validated"},
+        retrieved_at=retrieved_at,
+        data_version="akshare-test",
+        root=tmp_path,
+    )
+
+    raw_path = tmp_path / "raw/market/akshare/2026-08-19/600519.SH_secondary_raw.json"
+    audit_path = tmp_path / "processed/market/audit/600519.SH_2026-08-19_akshare_cross_validation.json"
+    assert paths["raw_path"] == str(raw_path)
+    assert paths["audit_path"] == str(audit_path)
+    raw_payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    audit_payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert raw_payload["source"] == "akshare"
+    assert raw_payload["retrieved_at"] == retrieved_at.isoformat()
+    assert raw_payload["raw_data"][0]["收盘"] == 100
+    assert audit_payload["status"] == "mismatch"
+    assert audit_payload["raw_path"] == str(raw_path)
+    assert audit_payload["comparison"]["metrics"]["close"]["max_diff_pct"] == 2.0
+
+    second = save_secondary_market_audit(
+        "600519.SH",
+        "akshare",
+        date(2026, 8, 19),
+        [{"raw": "second"}],
+        {"status": "matched"},
+        retrieved_at=retrieved_at,
+        root=tmp_path,
+    )
+    assert second["raw_path"] != paths["raw_path"]
+    assert second["audit_path"] != paths["audit_path"]
+
+
+def test_save_secondary_market_audit_records_unavailable_without_raw(tmp_path) -> None:
+    paths = save_secondary_market_audit(
+        "600519.SH",
+        "akshare",
+        date(2026, 8, 19),
+        comparison_report={"status": "unavailable", "warnings": ["接口失败"]},
+        error="接口失败",
+        root=tmp_path,
+    )
+    assert "raw_path" not in paths
+    payload = json.loads((tmp_path / "processed/market/audit/600519.SH_2026-08-19_akshare_cross_validation.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "unavailable"
+    assert payload["error"] == "接口失败"

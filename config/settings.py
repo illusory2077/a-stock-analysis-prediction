@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,11 @@ class Settings:
     tavily_api_key: str
     polygon_api_key: str
     sec_user_agent: str
+    market_cross_validate: bool = True
+    market_validate_calendar: bool = True
+    market_close_diff_threshold: float = 0.005
+    market_volume_diff_threshold: float = 0.02
+    market_amount_diff_threshold: float = 0.02
 
     @property
     def data_dir(self) -> Path:
@@ -63,6 +69,31 @@ def _load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"{name} 必须是布尔值，支持 true/false、1/0、yes/no")
+
+
+def _env_ratio(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是非负数字") from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} 必须是非负有限数字")
+    return value
+
+
 _load_dotenv(PROJECT_ROOT / ".env")
 
 
@@ -73,6 +104,11 @@ settings = Settings(
     data_timezone=os.getenv("DATA_TIMEZONE", "Asia/Shanghai"),
     request_timeout_seconds=int(os.getenv("REQUEST_TIMEOUT_SECONDS", "30")),
     request_max_retries=int(os.getenv("REQUEST_MAX_RETRIES", "3")),
+    market_cross_validate=_env_bool("MARKET_CROSS_VALIDATE", True),
+    market_validate_calendar=_env_bool("MARKET_VALIDATE_CALENDAR", True),
+    market_close_diff_threshold=_env_ratio("MARKET_CLOSE_DIFF_THRESHOLD", 0.005),
+    market_volume_diff_threshold=_env_ratio("MARKET_VOLUME_DIFF_THRESHOLD", 0.02),
+    market_amount_diff_threshold=_env_ratio("MARKET_AMOUNT_DIFF_THRESHOLD", 0.02),
     tushare_token=os.getenv("TUSHARE_TOKEN", ""),
     fred_api_key=os.getenv("FRED_API_KEY", ""),
     alphavantage_key=os.getenv("ALPHAVANTAGE_KEY", ""),
