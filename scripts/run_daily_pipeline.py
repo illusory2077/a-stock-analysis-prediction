@@ -8,6 +8,8 @@ from typing import Any
 
 import pandas as pd
 
+from config.settings import settings
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -19,13 +21,19 @@ from src.analysis import (  # noqa: E402
     TechnicalSignalError,
     calculate_technical_indicators,
     evaluate_fund_flow,
+    evaluate_news,
     evaluate_market_environment,
     generate_next_day_prediction,
     generate_technical_signals,
     evaluate_prediction_input,
 )
 from src.data_providers import DataProviderError, DataSourceRouter  # noqa: E402
-from src.news import NewsStore, deduplicate_news, normalize_tavily_response  # noqa: E402
+from src.news import (  # noqa: E402
+    NewsStore,
+    deduplicate_news,
+    filter_news_by_cutoff,
+    normalize_tavily_response,
+)
 from src.storage import (  # noqa: E402
     save_fund_flow,
     save_market_data,
@@ -126,6 +134,41 @@ def main() -> int:
             price_adjustment="none",
         )
         market_environment_paths[index_symbol]["secondary_audits"] = secondary_paths
+    news_result: dict[str, Any] | None = None
+    news_error = ""
+    news_dimension: dict[str, Any] | None = None
+    try:
+        query = f"{args.query} {' '.join(args.symbol)}".strip()
+        routed_news = router.search_news(query, time_range=args.news_time_range, max_results=args.max_news)
+        raw_response = routed_news["data"]
+        items = deduplicate_news(
+            normalize_tavily_response(
+                raw_response, query=query, retrieved_at=retrieved_at, related_symbols=args.symbol
+            )
+        )
+        cutoff_result = filter_news_by_cutoff(
+            items, cutoff=trade_date, timezone_name=settings.data_timezone
+        )
+        score_result = evaluate_news(
+            items, cutoff=trade_date, timezone_name=settings.data_timezone, generated_at=retrieved_at
+        )
+        paths = NewsStore().save_batch(
+            "tavily", raw_response, [*cutoff_result.eligible, *cutoff_result.excluded],
+            retrieved_at=retrieved_at,
+        )
+        news_result = {
+            "route": routed_news,
+            "items": [*cutoff_result.eligible, *cutoff_result.excluded],
+            "eligible_items": cutoff_result.eligible,
+            "excluded_items": cutoff_result.excluded,
+            "cutoff_report": cutoff_result.report,
+            "score": score_result,
+            "paths": paths,
+        }
+        news_dimension = score_result.to_dimension()
+    except (DataProviderError, ValueError) as exc:
+        news_error = str(exc)
+
     for symbol in args.symbol:
         try:
             routed = router.fetch_daily_bars(symbol, history_start, trade_date)
@@ -223,6 +266,7 @@ def main() -> int:
                                 symbol=symbol,
                                 market_environment=market_environment.to_dimension(),
                                 fund_flow=fund_flow_result.to_dimension(),
+                                news=news_dimension,
                                 generated_at=retrieved_at,
                             )
                             prediction_paths = save_next_day_prediction(
@@ -308,18 +352,6 @@ def main() -> int:
         except (DataProviderError, ValueError) as exc:
             failures.append(f"{symbol}: {exc}")
 
-    news_result: dict[str, Any] | None = None
-    news_error = ""
-    try:
-        query = f"{args.query} {' '.join(args.symbol)}".strip()
-        routed_news = router.search_news(query, time_range=args.news_time_range, max_results=args.max_news)
-        raw_response = routed_news["data"]
-        items = deduplicate_news(normalize_tavily_response(raw_response, query=query, retrieved_at=retrieved_at, related_symbols=args.symbol))
-        paths = NewsStore().save_batch("tavily", raw_response, items, retrieved_at=retrieved_at)
-        news_result = {"route": routed_news, "items": items, "paths": paths}
-    except (DataProviderError, ValueError) as exc:
-        news_error = str(exc)
-
     report_path = Path(args.report) if args.report else ROOT / "reports" / f"daily_{trade_date.isoformat()}.md"
     if not report_path.is_absolute():
         report_path = ROOT / report_path
@@ -327,7 +359,7 @@ def main() -> int:
     report_path.write_text(_render_report(args, trade_date, retrieved_at, market_results, failures, news_result, news_error, report_path), encoding="utf-8")
     print(f"报告已生成: {report_path}")
     print(f"Markdown绝对路径链接: [{report_path}]({report_path.as_uri()})")
-    print(f"行情成功: {len(market_results)}，行情失败: {len(failures)}，新闻: {len(news_result['items']) if news_result else 0}")
+    print(f"行情成功: {len(market_results)}，行情失败: {len(failures)}，新闻: {len(news_result['eligible_items']) if news_result else 0}")
     return 0 if market_results or news_result else 1
 
 
@@ -453,13 +485,29 @@ def _render_report(
     if news_result:
         route = news_result["route"]
         lines.append(f"- 来源：`{route['source']}`；是否降级：`{route['degraded']}`")
-        lines.append(f"- 结果数：{len(news_result['items'])}")
+        lines.append(f"- 结果数：{len(news_result['items'])}；有效数：{len(news_result.get('eligible_items', []))}；排除数：{len(news_result.get('excluded_items', []))}")
+        cutoff_report = news_result.get("cutoff_report", {})
+        lines.append(f"- 信息截面：`{cutoff_report.get('cutoff', '未知')}`；截面状态：`{cutoff_report.get('status', 'unknown')}`")
+        score_result = news_result.get("score")
+        if score_result is not None:
+            score_summary = score_result.summary
+            score = score_result.score
+            score_text = "NA" if score is None else f"{float(score):+.3f}"
+            lines.append(
+                f"- 消息面评分：`{score_text}`；数据截止：`{score_result.data_cutoff or '未知'}`；"
+                f"状态：`{score_summary.get('status', 'unknown')}`"
+            )
+            for evidence in score_summary.get("evidence", []):
+                lines.append(f"- 消息证据：{evidence}")
+            for warning in score_summary.get("warnings", []):
+                lines.append(f"- 消息警告：{warning}")
         lines.append(f"- 原始数据：`{news_result['paths']['raw_path']}`")
         lines.append(f"- 标准化数据：`{news_result['paths']['processed_path']}`")
         lines.append("")
         for item in news_result["items"]:
             title = item["title"] or item["url"]
-            lines.append(f"- [{title}]({item['url']})（发布时间：{item.get('published_at') or '未知'}）")
+            status = item.get("cutoff_status", "unknown")
+            lines.append(f"- [{title}]({item['url']})（发布时间：{item.get('published_at') or '未知'}；截面：`{status}`）")
     else:
         lines.append(f"- 新闻搜索失败：{news_error or '未返回结果'}")
     lines.extend(["", "## 数据限制", "", "- 行情统一为未复权日线；实时快照、分钟线和 Tick 不在本轮处理范围。", "- 预测必须先通过预测输入质量门禁；`blocked` 数据不得进入预测。", "- Tavily 用于新闻搜索，不代表实时行情。", "- 本报告仅记录采集结果，不构成投资建议。", ""])

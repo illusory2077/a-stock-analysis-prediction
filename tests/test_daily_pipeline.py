@@ -11,6 +11,7 @@ from src.analysis import (
     calculate_technical_indicators,
     evaluate_fund_flow,
     evaluate_market_environment,
+    evaluate_news,
     generate_next_day_prediction,
     generate_technical_signals,
 )
@@ -143,3 +144,55 @@ def test_render_report_includes_latest_technical_indicators(tmp_path: Path) -> N
     assert "置信度：`" in report
     assert "预测维度未接入真实数据" in report
     assert "600519.SH_2026-04-10_next_day_prediction.json" in report
+
+
+def test_render_report_includes_news_cutoff_and_score(tmp_path: Path) -> None:
+    args = Namespace(symbol=["600519.SH"])
+    news = evaluate_news(
+        [
+            {
+                "news_id": "n1",
+                "title": "公司业绩增长并获批新订单",
+                "published_at": "2026-04-10T15:00:00+08:00",
+                "source": "example.com",
+                "score": 0.9,
+            },
+            {
+                "news_id": "n2",
+                "title": "公司被处罚",
+                "published_at": "2026-04-11T09:00:00+08:00",
+                "source": "example.com",
+                "score": 0.9,
+            },
+        ],
+        cutoff=date(2026, 4, 10),
+        generated_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
+    )
+    report = _render_report(
+        args,
+        date(2026, 4, 10),
+        datetime(2026, 8, 31, tzinfo=timezone.utc),
+        [],
+        [],
+        {
+            "route": {"source": "tavily", "degraded": False},
+            "items": [{
+                "title": "公司业绩增长并获批新订单",
+                "url": "https://example.com/n1",
+                "published_at": "2026-04-10T15:00:00+08:00",
+                "cutoff_status": "eligible",
+            }],
+            "eligible_items": [{"news_id": "n1"}],
+            "excluded_items": [{"news_id": "n2"}],
+            "cutoff_report": {"status": "validated_with_warning", "cutoff": "2026-04-10T23:59:59.999999+08:00"},
+            "score": news,
+            "paths": {"raw_path": "raw/news/tavily/2026-04-10/raw.json", "processed_path": "processed/news/news_20260410.jsonl"},
+        },
+        "",
+        tmp_path / "daily.md",
+    )
+
+    assert "消息面评分：`" in report
+    assert "信息截面：`2026-04-10T23:59:59.999999+08:00`" in report
+    assert "有效数：1；排除数：1" in report
+    assert "截面：`eligible`" in report

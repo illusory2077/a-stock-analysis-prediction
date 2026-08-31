@@ -149,3 +149,10 @@ prediction = generate_next_day_prediction(
 每日流水线会通过 `DataSourceRouter.fetch_fund_flow` 获取个股日资金流向，优先使用 Tushare Pro `moneyflow`，并以 AKShare 个股资金流接口作为研究型备用源。资金流向会统一为人民币元，检查交易日、净流入金额、重复记录和主备差异，再由 `src.analysis.evaluate_fund_flow` 按最近 20 日净流入强度与近 5 日方向一致性生成 -1 到 +1 评分。
 
 资金流向原始响应、标准化数据、质量报告和主备审计分别保存到 `data/raw/fund_flow/`、`data/processed/fund_flow/`；日报中的 `#### 资金行为` 会展示评分、最新主力净流入、数据截止时间、证据和告警。资金接口失败时不阻断技术面分析，次日预测会标记资金维度不可用并按可用维度降权。
+
+
+### 消息面评分与信息截面
+
+每日流水线会在生成个股预测前获取 Tavily 新闻，先按发布时间执行信息截面过滤：目标交易日使用 `Asia/Shanghai` 当日收盘后的本地日期截面；缺少或无法解析 `published_at` 的新闻只保存审计，不进入评分；晚于截面的新闻会被排除，防止未来函数。
+
+`src.analysis.evaluate_news` 使用可解释的利好/利空关键词基线生成 -1 到 +1 的消息面评分，并将有效新闻数、排除数、关键词证据、评分规则版本和告警传入次日预测。新闻原始响应和带截面状态的标准化记录保存到 `data/raw/news/` 与 `data/processed/news/`。未配置 `TAVILY_API_KEY` 或新闻接口失败时，消息面标记为不可用，预测自动按实际可用维度重新归一化。
